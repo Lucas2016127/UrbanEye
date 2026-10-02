@@ -1,0 +1,1628 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UrbanEye</title>
+  <style>
+    :root {
+      --bg: #07111f;
+      --panel: #0f172a;
+      --primary: #38bdf8;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #020817, #0f172a 60%, #111827);
+      color: var(--text);
+      font-family: "Microsoft JhengHei", Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .app {
+      width: min(100%, 980px);
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 22px;
+      overflow: hidden;
+      box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4);
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 18px 24px;
+      background: rgba(15, 23, 42, 0.9);
+      border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+    }
+
+    .title {
+      font-size: 1.3rem;
+      font-weight: 700;
+    }
+
+    .buttons {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .language-select {
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #1e293b;
+      color: var(--text);
+      font-weight: 700;
+    }
+
+    button {
+      border: none;
+      border-radius: 12px;
+      padding: 10px 18px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: 0.15s ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+    #startBtn { background: var(--primary); color: #041a2b; }
+    #stopBtn { background: #334155; color: var(--text); }
+
+    .content {
+      display: grid;
+      grid-template-columns: 1.5fr 0.9fr;
+      gap: 18px;
+      padding: 20px;
+    }
+
+    .panel {
+      background: rgba(17, 24, 39, 0.9);
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 18px;
+      padding: 16px;
+    }
+
+    .camera-box {
+      position: relative;
+      border-radius: 16px;
+      overflow: hidden;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      background: #000;
+      border: 1px solid rgba(148,163,184,0.25);
+    }
+
+    video, canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+      background: #000;
+    }
+
+    .camera-box canvas {
+      position: absolute;
+      inset: 0;
+      display: block !important;
+      pointer-events: none;
+    }
+
+    .camera-box.preview-hidden video,
+    .camera-box.preview-hidden canvas {
+      visibility: hidden;
+    }
+
+    .status {
+      margin-top: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-weight: 700;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--success);
+      box-shadow: 0 0 12px rgba(34,197,94,0.7);
+    }
+
+    .dot.warning { background: var(--warning); box-shadow: 0 0 12px rgba(245,158,11,0.7); }
+    .dot.danger { background: var(--danger); box-shadow: 0 0 12px rgba(239,68,68,0.7); }
+
+    .info {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .metric {
+      background: rgba(30,41,59,0.9);
+      border: 1px solid rgba(148,163,184,0.2);
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+
+    .label {
+      color: var(--muted);
+      font-size: 0.78rem;
+      letter-spacing: 0.05em;
+      margin-bottom: 6px;
+    }
+
+    .value {
+      font-size: 1.6rem;
+      font-weight: 800;
+    }
+
+    .warning-text {
+      font-size: 1.05rem;
+      line-height: 1.6;
+      color: var(--text);
+    }
+
+    .log {
+      max-height: 180px;
+      overflow-y: auto;
+      display: grid;
+      gap: 8px;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .log-item {
+      background: rgba(15,23,42,0.85);
+      border: 1px solid rgba(148,163,184,0.18);
+      border-radius: 10px;
+      padding: 8px 10px;
+    }
+
+    .export-btn {
+      display: none;
+      margin-top: 10px;
+      background: #22c55e;
+      color: #052e16;
+    }
+
+    .export-btn.ready {
+      display: inline-block;
+    }
+
+    .calibration {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 14px;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      border-radius: 14px;
+      background: rgba(14, 116, 144, 0.12);
+    }
+
+    .calibration-controls {
+      display: flex;
+      align-items: end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .calibration label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .calibration input {
+      width: 110px;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 8px;
+      padding: 8px;
+      background: #0f172a;
+      color: var(--text);
+    }
+
+    #calibrateBtn {
+      background: #a7f3d0;
+      color: #064e3b;
+    }
+
+    #calibrateBtn:disabled {
+      cursor: wait;
+      opacity: 0.55;
+    }
+
+    .small {
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+
+    .kimi-panel {
+      display: grid;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 14px;
+      border: 1px solid rgba(167, 139, 250, 0.4);
+      border-radius: 14px;
+      background: rgba(91, 33, 182, 0.12);
+    }
+
+    .kimi-controls {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .kimi-controls input {
+      min-width: 220px;
+      flex: 1;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 8px;
+      padding: 10px;
+      background: #0f172a;
+      color: var(--text);
+    }
+
+    #kimiBtn {
+      background: #c4b5fd;
+      color: #2e1065;
+    }
+
+    @media (max-width: 760px) {
+      .content {
+        grid-template-columns: 1fr;
+      }
+      .topbar {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+      }
+
+    }
+  </style>
+  <script src="./vendor/onnxruntime/ort.min.js"></script>
+  <script src="./vendor/tensorflow/tf.min.js"></script>
+  <script src="./vendor/tensorflow/coco-ssd.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <div class="topbar">
+      <div class="title">UrbanEye</div>
+      <div class="buttons">
+        <label class="small" for="languageSelect">語音語言</label>
+        <select id="languageSelect" class="language-select">
+          <option value="yue-HK">廣東話</option>
+          <option value="zh-CN">普通話</option>
+          <option value="en-US">English</option>
+        </select>
+        <label class="small" for="modelModeSelect">偵測模型</label>
+        <select id="modelModeSelect" class="language-select">
+          <option value="yolo">專屬 YOLO 320</option>
+          <option value="coco">COCO-SSD 後備</option>
+        </select>
+        <span id="voiceStatus" class="small">正在載入語音...</span>
+        <button id="startBtn">開始偵測</button>
+        <button id="stopBtn">停止</button>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="panel">
+        <div class="camera-box">
+          <video id="video" autoplay playsinline muted></video>
+          <canvas id="overlay" style="display:none"></canvas>
+        </div>
+        <button id="previewBtn" type="button" disabled>預覽畫面</button>
+
+        <div class="calibration">
+          <strong>相機校準</strong>
+          <span class="small">請讓完整物件出現在鏡頭中央，再輸入實際尺寸。</span>
+          <div class="calibration-controls">
+            <label>手機預設
+              <select id="cameraPresetSelect" class="language-select">
+                <option value="default">通用預設（60°）</option>
+                <option value="iphone14">iPhone 14（約 65°）</option>
+                <option value="galaxyS23">Galaxy S23（約 68°）</option>
+                <option value="iphoneSE">iPhone SE（約 63°）</option>
+                <option value="custom">手動校準值</option>
+              </select>
+            </label>
+            <label>物件高度（米）
+              <input id="knownHeightInput" type="number" min="0.1" max="5" step="0.1" value="1.7">
+            </label>
+            <label>物件距離（米）
+              <input id="knownDistanceInput" type="number" min="0.3" max="20" step="0.1" value="2.0">
+            </label>
+            <button id="calibrateBtn" type="button">拍攝並校準</button>
+          </div>
+          <div id="calibrationStatus" class="small">目前使用預設視角 60°</div>
+        </div>
+
+        <div class="kimi-panel">
+          <strong>Kimi AI 輔助辨識（測試）</strong>
+          <span class="small">API key 只會送到本機代理，請勿在公開網站輸入私人 key。</span>
+          <div class="kimi-controls">
+            <input id="kimiApiKey" type="password" autocomplete="off" placeholder="輸入 Kimi API key">
+            <button id="kimiBtn" type="button">分析當下環境</button>
+          </div>
+          <div id="kimiStatus" class="small">輸入 API key 後，可按鈕或快速點擊螢幕兩下分析環境。</div>
+          <div id="kimiResult" class="warning-text">Kimi 尚未分析影像</div>
+        </div>
+
+        <div class="status">
+          <span class="badge"><span id="statusDot" class="dot"></span><span id="statusText">待機中</span></span>
+          <span id="lastAlert" style="color: var(--muted);">尚未偵測</span>
+        </div>
+      </div>
+
+      <div class="panel info">
+        <div class="metric">
+          <div class="label">風險等級</div>
+          <div class="value" id="riskValue">安全</div>
+        </div>
+
+        <div class="metric">
+          <div class="label">障礙物判定</div>
+          <div class="value" id="detectValue">無</div>
+        </div>
+
+        <div class="metric">
+          <div class="label">估算距離</div>
+          <div class="value" id="distanceValue">--</div>
+        </div>
+
+        <div class="metric">
+          <div class="label">手機俯仰角</div>
+          <div class="value" id="pitchValue">未提供</div>
+        </div>
+
+        <div class="metric">
+          <div class="label">Adaptive FPS</div>
+          <div class="value" id="fpsValue">30.0 FPS</div>
+        </div>
+
+        <div class="metric">
+          <div class="label">警報內容</div>
+          <div class="warning-text" id="warningText">系統已就緒</div>
+        </div>
+
+        <div class="metric">
+          <div class="label">偵測記錄</div>
+          <div class="log" id="log"></div>
+          <button id="exportBtn" class="export-btn" type="button">匯出實驗數據 (CSV)</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const cameraBox = document.querySelector('.camera-box');
+    const previewBtn = document.getElementById('previewBtn');
+    let previewEnabled = false;
+    cameraBox.classList.add('preview-hidden');
+    video.setAttribute('playsinline', 'true');
+    video.setAttribute('webkit-playsinline', 'true');
+    video.setAttribute('muted', 'true');
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+
+    const overlay = document.getElementById('overlay');
+    const statusText = document.getElementById('statusText');
+    const statusDot = document.getElementById('statusDot');
+    const riskValue = document.getElementById('riskValue');
+    const detectValue = document.getElementById('detectValue');
+    const warningText = document.getElementById('warningText');
+    const lastAlert = document.getElementById('lastAlert');
+    const log = document.getElementById('log');
+    const distanceValue = document.getElementById('distanceValue');
+    const fpsValue = document.getElementById('fpsValue');
+    const pitchValue = document.getElementById('pitchValue');
+    const exportBtn = document.getElementById('exportBtn');
+    const knownHeightInput = document.getElementById('knownHeightInput');
+    const knownDistanceInput = document.getElementById('knownDistanceInput');
+    const calibrateBtn = document.getElementById('calibrateBtn');
+    const calibrationStatus = document.getElementById('calibrationStatus');
+    const languageSelect = document.getElementById('languageSelect');
+    const voiceStatus = document.getElementById('voiceStatus');
+    const kimiApiKey = document.getElementById('kimiApiKey');
+    const kimiBtn = document.getElementById('kimiBtn');
+    const kimiStatus = document.getElementById('kimiStatus');
+    const kimiResult = document.getElementById('kimiResult');
+
+    let stream = null;
+    let animationId = null;
+    let prevFrame = null;
+    let lastSpeechTime = 0;
+    let started = false;
+    let obstacleActive = false;
+    let lastTriggerTime = 0;
+    let detectionModel = null;
+    let modelPromise = null;
+    let detecting = false;
+    let activeSession = 0;
+    const FIXED_FPS = 30;
+    const FIXED_DETECTION_DELAY = 1000 / FIXED_FPS;
+    let nextDetectionDelay = FIXED_DETECTION_DELAY;
+    let lastInferenceMs = 0;
+    let movementRate = 0;
+    let previousMotionData = null;
+    const motionCanvas = document.createElement('canvas');
+    motionCanvas.width = 64;
+    motionCanvas.height = 36;
+    const motionContext = motionCanvas.getContext('2d', { willReadFrequently: true });
+    let audioContext = null;
+    let watchdogTimer = null;
+    let lastDetectionActivity = 0;
+    let consecutiveInferenceTimeouts = 0;
+    const trackedObstacles = new Map();
+    const AREA_EXPANSION_EMERGENCY_RATE = 0.45;
+    const TRACK_TIMEOUT_MS = 1500;
+    let speechLanguage = localStorage.getItem('speechLanguage') || 'yue-HK';
+    let availableVoices = [];
+    let kimiBusy = false;
+    let kimiLastRequest = 0;
+    const KIMI_COOLDOWN_MS = 2000;
+    const experimentRecords = [];
+
+    const CUSTOM_MODEL_URL = './models/obstacle-yolo/yolov11best.onnx';
+    const MODEL_INPUT_SIZE = 320;
+    const CUSTOM_LABELS = {
+      balcony_cage: '露台鐵籠',
+      construction_barrier: '施工路障',
+      hanging_branc: '懸空樹枝',
+      motorcycle: '電單車',
+      pedestrian_guardrail: '行人護欄',
+      protruding_signboard: '凸出招牌',
+      scaffolding: '棚架',
+      utility_pole: '電線桿'
+    };
+    const CUSTOM_MODEL_CLASSES = new Set(Object.keys(CUSTOM_LABELS));
+    const COCO_THREAT_CLASSES = new Set([
+      'person', 'bicycle', 'motorcycle', 'car', 'bus', 'truck', 'traffic light',
+      'stop sign', 'bench', 'chair', 'umbrella', 'skateboard'
+    ]);
+    const CUSTOM_MODEL_HEIGHTS = {
+      balcony_cage: 1.2,
+      construction_barrier: 1.0,
+      hanging_branc: 0.6,
+      motorcycle: 1.2,
+      pedestrian_guardrail: 1.1,
+      protruding_signboard: 0.6,
+      scaffolding: 2.5,
+      utility_pole: 2.5,
+    };
+    const CUSTOM_MODEL_PRIORITY = {
+      balcony_cage: 1.1,
+      construction_barrier: 1.1,
+      hanging_branc: 1.2,
+      motorcycle: 1.0,
+      pedestrian_guardrail: 1.2,
+      protruding_signboard: 1.2,
+      scaffolding: 1.1,
+      utility_pole: 1.0
+    };
+    let activeModelName = '專屬 YOLO 320 ONNX 模型';
+    const modelModeSelect = document.getElementById('modelModeSelect');
+    let selectedModelMode = localStorage.getItem('modelMode') || 'yolo';
+    modelModeSelect.value = selectedModelMode;
+
+    const DEFAULT_CAMERA_HORIZONTAL_FOV_DEG = 60;
+    const DEFAULT_CAMERA_VERTICAL_FOV_DEG = 45;
+    let cameraFocalLengthPixels = null;
+    let cameraHorizontalFovDeg = DEFAULT_CAMERA_HORIZONTAL_FOV_DEG;
+    const cameraPresetSelect = document.getElementById('cameraPresetSelect');
+    const CAMERA_PRESETS = {
+      default: { name: '通用', horizontalFovDeg: DEFAULT_CAMERA_HORIZONTAL_FOV_DEG },
+      iphone14: { name: 'iPhone 14', horizontalFovDeg: 65 },
+      galaxyS23: { name: 'Galaxy S23', horizontalFovDeg: 68 },
+      iphoneSE: { name: 'iPhone SE', horizontalFovDeg: 63 }
+    };
+    let devicePitchDeg = 0;
+    let orientationAvailable = false;
+    let orientationListenerStarted = false;
+    const KNOWN_HEIGHT_METERS = {
+      person: 1.7,
+      bicycle: 1.1,
+      motorcycle: 1.2,
+      car: 1.5,
+      bus: 3.2,
+      truck: 3.0
+    };
+
+    kimiBtn.addEventListener('click', () => { void askKimiForScene(); });
+
+    function captureFrameDataUrl() {
+      if (!video.videoWidth || !video.videoHeight) return null;
+      const frame = document.createElement('canvas');
+      const maxWidth = 640;
+      const scale = Math.min(1, maxWidth / video.videoWidth);
+      frame.width = Math.round(video.videoWidth * scale);
+      frame.height = Math.round(video.videoHeight * scale);
+      frame.getContext('2d').drawImage(video, 0, 0, frame.width, frame.height);
+      return frame.toDataURL('image/jpeg', 0.65);
+    }
+
+    async function askKimiForScene() {
+      const key = kimiApiKey.value.trim();
+      if (!key) {
+        kimiStatus.textContent = '請先輸入 Kimi API key。';
+        return;
+      }
+      if (!started || !video.videoWidth) {
+        kimiStatus.textContent = '請先啟動攝影機和 AI。';
+        return;
+      }
+      if (kimiBusy) {
+        kimiStatus.textContent = '正在分析環境，請稍候。';
+        return;
+      }
+      const now = Date.now();
+      if (now - kimiLastRequest < KIMI_COOLDOWN_MS) {
+        kimiStatus.textContent = '請稍候 2 秒再分析。';
+        return;
+      }
+      const imageDataUrl = captureFrameDataUrl();
+      if (!imageDataUrl) return;
+
+      kimiBusy = true;
+      kimiLastRequest = now;
+      kimiStatus.textContent = 'Kimi 正在分析當下環境...';
+      speak('正在分析環境。');
+      try {
+        const response = await fetch('http://localhost:8787/api/kimi', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: key,
+            imageDataUrl,
+            language: speechLanguage
+          })
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+        const resultText = result.text || 'Kimi 沒有回傳分析結果。';
+        kimiResult.textContent = resultText;
+        kimiStatus.textContent = `最近分析：${new Date().toLocaleTimeString()}`;
+        speak(resultText);
+      } catch (error) {
+        kimiStatus.textContent = 'Kimi 連線失敗';
+        kimiResult.textContent = error.message.includes('fetch')
+          ? '請先啟動 kimi_proxy_server.js（localhost:8787）。'
+          : error.message;
+      } finally {
+        kimiBusy = false;
+      }
+    }
+
+    languageSelect.value = speechLanguage;
+    languageSelect.addEventListener('change', () => {
+      speechLanguage = languageSelect.value;
+      localStorage.setItem('speechLanguage', speechLanguage);
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      updateVoiceStatus();
+    });
+
+    function refreshVoices() {
+      if (!('speechSynthesis' in window)) {
+        voiceStatus.textContent = '此瀏覽器不支援語音，仍可使用鏡頭偵測。';
+        return;
+      }
+      availableVoices = window.speechSynthesis.getVoices();
+      updateVoiceStatus();
+    }
+
+    function findVoice(language) {
+      const normalizedLanguage = language.toLowerCase();
+      const cantoneseVoice = voice => {
+        const text = `${voice.name} ${voice.lang}`.toLowerCase();
+        return text.includes('yue') || text.includes('cantonese')
+          || text.includes('廣東') || text.includes('粵語')
+          || text.includes('hiugaai') || text.includes('hiumaan');
+      };
+
+      if (language === 'yue-HK') {
+        return availableVoices.find(cantoneseVoice)
+          || availableVoices.find(voice => voice.lang.toLowerCase() === 'zh-hk');
+      }
+
+      return availableVoices.find(voice => voice.lang.toLowerCase() === normalizedLanguage)
+        || availableVoices.find(voice => voice.lang.toLowerCase().startsWith(normalizedLanguage.slice(0, 2)));
+    }
+
+    function updateVoiceStatus() {
+      const voice = findVoice(speechLanguage);
+      const languageName = speechLanguage === 'yue-HK'
+        ? '廣東話'
+        : speechLanguage === 'zh-CN' ? '普通話' : 'English';
+      if (!voice) {
+        voiceStatus.textContent = availableVoices.length === 0
+          ? `${languageName}語音清單未載入，將使用瀏覽器預設聲音。`
+          : `${languageName}語音未找到，將使用瀏覽器預設聲音。`;
+        return;
+      }
+      voiceStatus.textContent = `目前語音：${voice.name}`;
+    }
+
+    if ('speechSynthesis' in window) {
+      voiceStatus.textContent = '語音功能可用，正在取得語音清單...';
+      refreshVoices();
+      window.setTimeout(refreshVoices, 1000);
+      window.setTimeout(refreshVoices, 3000);
+      window.speechSynthesis.addEventListener('voiceschanged', refreshVoices);
+    } else {
+      refreshVoices();
+    }
+
+    function loadCalibration() {
+      const savedFocalLength = Number(localStorage.getItem('cameraFocalLengthPixels'));
+      const savedFov = Number(localStorage.getItem('cameraHorizontalFovDeg'));
+      if (savedFocalLength > 0 && savedFov > 0) {
+        cameraFocalLengthPixels = savedFocalLength;
+        cameraHorizontalFovDeg = savedFov;
+        cameraPresetSelect.value = 'custom';
+        calibrationStatus.textContent = `已載入校準值：實際視角約 ${savedFov.toFixed(1)}°`;
+        return;
+      }
+      const savedPreset = localStorage.getItem('cameraPreset') || 'default';
+      applyCameraPreset(savedPreset, false);
+    }
+
+    function applyCameraPreset(presetKey, announce = true) {
+      const preset = CAMERA_PRESETS[presetKey] || CAMERA_PRESETS.default;
+      cameraFocalLengthPixels = null;
+      cameraHorizontalFovDeg = preset.horizontalFovDeg;
+      cameraPresetSelect.value = presetKey in CAMERA_PRESETS ? presetKey : 'default';
+      localStorage.removeItem('cameraFocalLengthPixels');
+      localStorage.setItem('cameraHorizontalFovDeg', String(preset.horizontalFovDeg));
+      localStorage.setItem('cameraPreset', cameraPresetSelect.value);
+      calibrationStatus.textContent = `${preset.name}預設視角約 ${preset.horizontalFovDeg}°，可直接測距。`;
+      if (announce) addLog(`已套用${preset.name}相機預設，視角 ${preset.horizontalFovDeg}°`);
+    }
+
+    function getFocalLengthPixels(frameWidth) {
+      if (cameraFocalLengthPixels) return cameraFocalLengthPixels;
+      return frameWidth / (2 * Math.tan((cameraHorizontalFovDeg * Math.PI / 180) / 2));
+    }
+
+    function getVerticalFocalLengthPixels(frameWidth, frameHeight) {
+      if (!frameWidth || !frameHeight) return frameHeight / (2 * Math.tan((DEFAULT_CAMERA_VERTICAL_FOV_DEG * Math.PI / 180) / 2));
+      return getFocalLengthPixels(frameWidth) * (frameHeight / frameWidth);
+    }
+
+    function getScenePartition(frameWidth, frameHeight) {
+      const verticalFocalLength = getVerticalFocalLengthPixels(frameWidth, frameHeight);
+      const pitchRadians = devicePitchDeg * Math.PI / 180;
+      const horizonY = frameHeight / 2 - Math.tan(pitchRadians) * verticalFocalLength;
+      const groundBoundaryY = frameHeight / 2
+        + Math.tan((5 * Math.PI / 180) - pitchRadians) * verticalFocalLength;
+      const headChestBoundaryY = frameHeight / 2
+        + Math.tan((-5 * Math.PI / 180) - pitchRadians) * verticalFocalLength;
+      const verticalFovDeg = 2 * Math.atan(frameHeight / (2 * verticalFocalLength)) * 180 / Math.PI;
+      return { horizonY, groundBoundaryY, headChestBoundaryY, verticalFovDeg };
+    }
+
+    function getSceneZone(prediction, frameWidth, frameHeight) {
+      const [, y, , height] = prediction.bbox;
+      const partition = getScenePartition(frameWidth, frameHeight);
+      const bottom = y + height;
+      const center = y + height / 2;
+      if (bottom >= partition.groundBoundaryY) return { name: 'ground', label: '地面區', partition };
+      if (center <= partition.headChestBoundaryY) return { name: 'headChest', label: '頭胸半空區', partition };
+      return { name: 'transition', label: '過渡區', partition };
+    }
+
+    function updateDevicePitch(event) {
+      if (!Number.isFinite(event.beta)) return;
+      devicePitchDeg = Math.max(-80, Math.min(80, event.beta - 90));
+      orientationAvailable = true;
+      pitchValue.textContent = `${devicePitchDeg >= 0 ? '+' : ''}${devicePitchDeg.toFixed(1)}°`;
+    }
+
+    async function startOrientationTracking() {
+      if (orientationListenerStarted || !('DeviceOrientationEvent' in window)) return;
+      try {
+        if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+          const permission = await DeviceOrientationEvent.requestPermission();
+          if (permission !== 'granted') return;
+        }
+        window.addEventListener('deviceorientation', updateDevicePitch, true);
+        orientationListenerStarted = true;
+      } catch (error) {
+        console.warn('Device orientation unavailable.', error);
+      }
+    }
+
+    async function calibrateCamera() {
+      const knownHeight = Number(knownHeightInput.value);
+      const knownDistance = Number(knownDistanceInput.value);
+      if (!detectionModel || !video.videoWidth || knownHeight <= 0 || knownDistance <= 0) {
+        calibrationStatus.textContent = '請先啟動 AI，並輸入有效尺寸與距離。';
+        return;
+      }
+
+      calibrateBtn.disabled = true;
+      calibrationStatus.textContent = '正在拍攝並辨識校準物件...';
+      try {
+        const predictions = await detectionModel.detect(video);
+        // 放寬限制，允許所有高信心偵測物件進行校準。
+        const candidate = predictions
+          .filter(prediction => prediction.score >= 0.5)
+          .sort((a, b) => b.score - a.score)[0];
+          
+        if (!candidate || candidate.bbox[3] <= 0) {
+          calibrationStatus.textContent = '找不到完整物件，請把物件放在鏡頭中央後重試。';
+          return;
+        }
+
+        // 記錄當下校準的物件類別，供測距時對應
+        window.activeCalibratedClass = candidate.class;
+
+        const pixelHeight = candidate.bbox[3];
+        // 修正：將校準當下的手機俯仰角算入焦距，消除不對稱誤差
+        const pitchRadians = devicePitchDeg * Math.PI / 180;
+        const pitchCompensation = Math.max(0.15, Math.cos(pitchRadians));
+        cameraFocalLengthPixels = (pixelHeight * knownDistance) / (knownHeight * pitchCompensation);
+        const calibratedFov = 2 * Math.atan(video.videoWidth / (2 * cameraFocalLengthPixels)) * 180 / Math.PI;
+        cameraHorizontalFovDeg = calibratedFov;
+        localStorage.setItem('cameraFocalLengthPixels', String(cameraFocalLengthPixels));
+        localStorage.setItem('cameraHorizontalFovDeg', String(calibratedFov));
+        localStorage.setItem('cameraPreset', 'custom');
+        cameraPresetSelect.value = 'custom';
+        calibrationStatus.textContent = `校準完成：視角約 ${calibratedFov.toFixed(1)}°，距離估算已更新。`;
+        addLog(`相機校準完成，視角 ${calibratedFov.toFixed(1)}°`);
+      } catch (error) {
+        console.error(error);
+        calibrationStatus.textContent = '校準失敗，請確認鏡頭仍在運作後重試。';
+      } finally {
+        calibrateBtn.disabled = false;
+      }
+    }
+
+    function addLog(message) {
+      const item = document.createElement('div');
+      item.className = 'log-item';
+      item.textContent = new Date().toLocaleTimeString() + ' - ' + message;
+      log.prepend(item);
+      while (log.children.length > 8) {
+        log.removeChild(log.lastChild);
+      }
+    }
+
+    function recordExperimentData({ objectName = '', distance = '', areaExpansionRate = 0 }) {
+      experimentRecords.push({
+        time: new Date().toISOString(),
+        pitch: devicePitchDeg,
+        fps: 1000 / Math.max(1, nextDetectionDelay),
+        object: objectName,
+        distance,
+        areaExpansionRate
+      });
+      exportBtn.classList.add('ready');
+    }
+
+    function escapeCsvValue(value) {
+      const text = String(value ?? '');
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+
+    function exportExperimentData() {
+      if (!experimentRecords.length) return;
+      const headers = ['Time', 'Pitch', 'FPS', 'Object', 'Distance', 'TTC (areaExpansionRate)'];
+      const rows = experimentRecords.map(record => [
+        record.time,
+        `${record.pitch.toFixed(2)}°`,
+        record.fps.toFixed(2),
+        record.object,
+        record.distance === '' ? '' : Number(record.distance).toFixed(2),
+        `${(record.areaExpansionRate * 100).toFixed(2)}%/s`
+      ]);
+      const csv = [headers, ...rows]
+        .map(row => row.map(escapeCsvValue).join(','))
+        .join('\r\n');
+      const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const downloadLink = document.createElement('a');
+      downloadLink.href = url;
+      downloadLink.download = `obstacle-experiment-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`;
+      downloadLink.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function speak(text) {
+      try {
+        if (!('speechSynthesis' in window)) return;
+        const now = Date.now();
+        if (now - lastSpeechTime < 2000) return;
+        if (window.speechSynthesis.speaking) return;
+        lastSpeechTime = now;
+        const msg = new SpeechSynthesisUtterance(text);
+        msg.lang = speechLanguage;
+        const voice = findVoice(speechLanguage);
+        if (voice) msg.voice = voice;
+        msg.rate = 1.0;
+        msg.pitch = 1.0;
+        window.speechSynthesis.speak(msg);
+      } catch (error) {
+        console.warn('Speech unavailable; detection will continue.', error);
+      }
+    }
+
+    function ensureAudioContext() {
+      if (!audioContext) {
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return false;
+        audioContext = new AudioContextClass();
+      }
+      if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+      return true;
+    }
+
+    function playDirectionTone(direction, urgent = false) {
+      try {
+        if (!ensureAudioContext()) return;
+        const directionTone = direction === 'left'
+          ? { frequency: 330, pan: -0.85, pulses: 2 }
+          : direction === 'right'
+            ? { frequency: 660, pan: 0.85, pulses: 2 }
+            : { frequency: 500, pan: 0, pulses: 3 };
+        const pulseDuration = urgent ? 0.16 : 0.1;
+        const gap = urgent ? 0.08 : 0.06;
+        for (let pulse = 0; pulse < directionTone.pulses; pulse++) {
+          const startTime = audioContext.currentTime + pulse * (pulseDuration + gap);
+          const channels = urgent ? [-0.9, 0.9] : [directionTone.pan];
+          channels.forEach(channelPan => {
+            const oscillator = audioContext.createOscillator();
+            const gain = audioContext.createGain();
+            const pan = audioContext.createStereoPanner();
+            oscillator.type = urgent ? 'square' : 'sine';
+            oscillator.frequency.value = urgent ? directionTone.frequency * 1.5 : directionTone.frequency;
+            pan.pan.value = channelPan;
+            gain.gain.setValueAtTime(0.0001, startTime);
+            gain.gain.exponentialRampToValueAtTime(urgent ? 0.12 : 0.06, startTime + 0.015);
+            gain.gain.exponentialRampToValueAtTime(0.0001, startTime + pulseDuration);
+            oscillator.connect(gain).connect(pan).connect(audioContext.destination);
+            oscillator.start(startTime);
+            oscillator.stop(startTime + pulseDuration + 0.02);
+          });
+        }
+      } catch (error) {
+        console.warn('Directional audio unavailable.', error);
+      }
+    }
+
+    function triggerEmergencyVibration() {
+      try {
+        if ('vibrate' in navigator) navigator.vibrate([120, 60, 120, 60, 180]);
+      } catch (error) {
+        console.warn('Vibration unavailable.', error);
+      }
+    }
+
+    function playStartupTone() {
+      try {
+        if (!ensureAudioContext()) return;
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(660, audioContext.currentTime + 0.18);
+        gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.08, audioContext.currentTime + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.24);
+        oscillator.connect(gain).connect(audioContext.destination);
+        oscillator.start();
+        oscillator.stop(audioContext.currentTime + 0.26);
+      } catch (error) {
+        console.warn('Startup audio unavailable.', error);
+      }
+    }
+
+    function objectTrackKey(prediction, frameWidth) {
+      const [x, , width] = prediction.bbox;
+      return `${prediction.class}:${Math.round(((x + width / 2) / frameWidth) * 10)}`;
+    }
+
+    function getDirection(prediction, frameWidth) {
+      const [x, , width] = prediction.bbox;
+      const center = x + width / 2;
+      if (center < frameWidth * 0.38) return 'left';
+      if (center > frameWidth * 0.62) return 'right';
+      return 'center';
+    }
+
+    function updateTrack(prediction, frameWidth, now) {
+      const key = objectTrackKey(prediction, frameWidth);
+      const [x, y, width, height] = prediction.bbox;
+      const centerX = x + width / 2;
+      const centerY = y + height / 2;
+      const distance = estimateDistanceMeters(prediction, frameWidth);
+      const sceneZone = getSceneZone(prediction, frameWidth, video.videoHeight);
+      const area = Math.max(1, width * height);
+      const previous = trackedObstacles.get(key);
+      const elapsedSeconds = previous ? Math.max(0.05, (now - previous.time) / 1000) : null;
+      const areaExpansionRate = previous && previous.area > 0
+        ? (area - previous.area) / previous.area / elapsedSeconds
+        : 0;
+      const corridor = centerX > frameWidth * 0.25 && centerX < frameWidth * 0.75;
+      const threatLevel = corridor && areaExpansionRate >= AREA_EXPANSION_EMERGENCY_RATE
+        ? 'emergency'
+        : 'ambient';
+      const track = {
+        key, time: now, centerX, centerY, distance, sceneZone, area, areaExpansionRate, threatLevel,
+        direction: getDirection(prediction, frameWidth),
+        className: prediction.class
+      };
+      trackedObstacles.set(key, track);
+      return { track, previous };
+    }
+
+    function cleanTracks(now) {
+      for (const [key, track] of trackedObstacles) {
+        if (now - track.time > TRACK_TIMEOUT_MS) trackedObstacles.delete(key);
+      }
+    }
+
+    function scheduleDetection(sessionId) {
+      if (sessionId !== activeSession || !started) return;
+      if (animationId) clearTimeout(animationId);
+      animationId = setTimeout(() => {
+        animationId = null;
+        detectObstacle(sessionId);
+      }, nextDetectionDelay);
+    }
+
+    function startWatchdog(sessionId) {
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      watchdogTimer = setInterval(() => {
+        if (sessionId !== activeSession || !started) return;
+        const stale = !detecting && Date.now() - lastDetectionActivity > 6000;
+        if (stale && !animationId) {
+          detecting = false;
+          consecutiveInferenceTimeouts = 0;
+          lastDetectionActivity = Date.now();
+          scheduleDetection(sessionId);
+        }
+        if (video.readyState >= 2 && video.paused) {
+          video.play().catch(() => {});
+        }
+      }, 2000);
+    }
+
+    function handleAlert(track, previous, displayWarning) {
+      try {
+        const becameEmergency = track.threatLevel === 'emergency'
+          && (!previous || previous.threatLevel !== 'emergency');
+        if (becameEmergency) {
+          const translatedWarning = translateWarning(displayWarning);
+          const emergencyText = speechLanguage === 'en-US'
+            ? 'The obstacle is rapidly approaching. Stop immediately.'
+            : speechLanguage === 'zh-CN'
+              ? '前方障礙物正在快速接近，請立即停下。'
+              : '前面障礙物正在快速接近，請即刻停低。';
+          speak(`${emergencyText} ${translatedWarning}`);
+          playDirectionTone(track.direction, true);
+          triggerEmergencyVibration();
+          addLog(`緊急警報：面積膨脹率 ${(track.areaExpansionRate * 100).toFixed(0)}%/秒`);
+        } else if (!previous || previous.threatLevel !== 'ambient') {
+          playDirectionTone(track.direction);
+          addLog(`環境音提示：${track.direction === 'left' ? '左方' : track.direction === 'right' ? '右方' : '正前方'}`);
+        }
+      } catch (error) {
+        console.warn('Alert handling failed; detection will continue.', error);
+      }
+    }
+
+    function setRisk(level, text) {
+      riskValue.textContent = level;
+      warningText.textContent = text;
+      if (level === '安全') {
+        statusText.textContent = '安全';
+        statusDot.className = 'dot';
+      } else if (level === '中風險') {
+        statusText.textContent = '中風險';
+        statusDot.className = 'dot warning';
+      } else if (level === '低風險') {
+        statusText.textContent = '低風險';
+        statusDot.className = 'dot warning';
+      } else {
+        statusText.textContent = '高風險';
+        statusDot.className = 'dot danger';
+      }
+    }
+
+    function averageBrightness(data, x, y, w, h) {
+      let total = 0;
+      let count = 0;
+      for (let row = y; row < y + h; row++) {
+        for (let col = x; col < x + w; col++) {
+          const idx = (row * video.videoWidth + col) * 4;
+          const r = data[idx];
+          const g = data[idx + 1];
+          const b = data[idx + 2];
+          total += (r + g + b) / 3;
+          count++;
+        }
+      }
+      return count ? total / count : 0;
+    }
+
+    function regionDifference(current, prev, x, y, w, h, width) {
+      let diff = 0;
+      let count = 0;
+      for (let row = y; row < y + h; row++) {
+        for (let col = x; col < x + w; col++) {
+          const idx = (row * width + col) * 4;
+          diff += Math.abs(current[idx] - prev[idx])
+                + Math.abs(current[idx + 1] - prev[idx + 1])
+                + Math.abs(current[idx + 2] - prev[idx + 2]);
+          count++;
+        }
+      }
+      return count ? diff / count : 0;
+    }
+
+    function drawDetection(ctx, prediction) {
+      const [x, y, width, height] = prediction.bbox;
+      const isThreat = CUSTOM_MODEL_CLASSES.has(prediction.class);
+      const distance = estimateDistanceMeters(prediction, ctx.canvas.width);
+      const sceneZone = getSceneZone(prediction, ctx.canvas.width, ctx.canvas.height);
+      const label = CUSTOM_LABELS[prediction.class] || prediction.class;
+      ctx.strokeStyle = isThreat ? '#ef4444' : '#22c55e';
+      ctx.lineWidth = 4;
+      ctx.strokeRect(x, y, width, height);
+      ctx.fillStyle = isThreat ? '#ef4444' : '#22c55e';
+      ctx.font = 'bold 18px Microsoft JhengHei';
+      const distanceText = Number.isFinite(distance) ? `${distance.toFixed(1)}m` : '--';
+      ctx.fillText(`${label} ${sceneZone.label} ${Math.round(prediction.score * 100)}% | ${distanceText}`, x + 6, Math.max(22, y - 8));
+    }
+
+    function drawScenePartition(ctx, width, height) {
+      const { groundBoundaryY, headChestBoundaryY } = getScenePartition(width, height);
+      ctx.save();
+      ctx.setLineDash([12, 8]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(245, 158, 11, 0.9)';
+      ctx.beginPath();
+      ctx.moveTo(0, groundBoundaryY);
+      ctx.lineTo(width, groundBoundaryY);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.9)';
+      ctx.beginPath();
+      ctx.moveTo(0, headChestBoundaryY);
+      ctx.lineTo(width, headChestBoundaryY);
+      ctx.stroke();
+      ctx.restore();
+    }
+function estimateDistanceMeters(prediction, frameWidth) {
+      // 檢查目前看著的物件，是否為剛才校準的目標類別
+      const isCalibratedTarget = (window.activeCalibratedClass && prediction.class === window.activeCalibratedClass);
+      
+      // 如果是校準目標，優先使用介面上的高度；否則使用預設高度
+      const realHeight = isCalibratedTarget 
+          ? Number(document.getElementById('knownHeightInput').value) 
+          : (CUSTOM_MODEL_HEIGHTS[prediction.class] || KNOWN_HEIGHT_METERS[prediction.class]);
+          
+      const pixelHeight = prediction.bbox[3];
+      if (!realHeight || !pixelHeight || !frameWidth) return Infinity;
+      
+      const focalLengthPixels = getFocalLengthPixels(frameWidth);
+      const pitchRadians = devicePitchDeg * Math.PI / 180;
+      const pitchCompensation = Math.max(0.15, Math.cos(pitchRadians));
+      
+      return (realHeight * focalLengthPixels * pitchCompensation) / pixelHeight;
+    }
+    function updateMovementRate(source) {
+      motionContext.drawImage(source, 0, 0, motionCanvas.width, motionCanvas.height);
+      const currentData = motionContext.getImageData(0, 0, motionCanvas.width, motionCanvas.height).data;
+      if (!previousMotionData) {
+        previousMotionData = new Uint8ClampedArray(currentData);
+        movementRate = 1;
+        return;
+      }
+
+      let difference = 0;
+      for (let index = 0; index < currentData.length; index += 4) {
+        difference += Math.abs(currentData[index] - previousMotionData[index]);
+        difference += Math.abs(currentData[index + 1] - previousMotionData[index + 1]);
+        difference += Math.abs(currentData[index + 2] - previousMotionData[index + 2]);
+      }
+      const pixelCount = currentData.length / 4;
+      movementRate = difference / (pixelCount * 3 * 255);
+      previousMotionData = new Uint8ClampedArray(currentData);
+    }
+
+    function updateAdaptiveFps(inferenceMs) {
+      lastInferenceMs = inferenceMs;
+      nextDetectionDelay = FIXED_DETECTION_DELAY;
+      fpsValue.textContent = `${FIXED_FPS.toFixed(1)} FPS`;
+    }
+
+    function getCantoneseWarning(prediction, videoWidth) {
+      const [x, , width] = prediction.bbox;
+      const center = x + width / 2;
+      const label = CUSTOM_LABELS[prediction.class] || '障礙物';
+
+      if (center < videoWidth * 0.38) {
+        return [`前左方有${label}，請向右轉`, '前左方有障礙物，請向右轉'];
+      }
+      if (center > videoWidth * 0.62) {
+        return [`前右方有${label}，請向左轉`, '前右方有障礙物，請向左轉'];
+      }
+      return [`前面有${label}，請放慢步伐`, '前面可能有阻擋，請放慢步伐'];
+    }
+
+    function normalizeCustomPrediction(values, shape, width, height, inputSize) {
+      const rowCount = shape.length === 3 ? shape[1] : shape[0];
+      const columnCount = shape.length === 3 ? shape[2] : shape[1];
+      const channelsFirst = shape.length === 3 && shape[1] === 6;
+      const count = channelsFirst ? columnCount : rowCount;
+      const predictions = [];
+      for (let index = 0; index < count; index++) {
+        const read = channel => channelsFirst
+          ? values[channel * count + index]
+          : values[index * columnCount + channel];
+        const x1 = read(0);
+        const y1 = read(1);
+        const x2 = read(2);
+        const y2 = read(3);
+        const score = read(4);
+        const classIndex = Math.round(read(5));
+        if (!Number.isFinite(score) || score < 0.01 || classIndex < 0) continue;
+        const normalized = Math.max(Math.abs(x1), Math.abs(y1), Math.abs(x2), Math.abs(y2)) <= 1.5;
+        const scaleX = normalized ? width : width / inputSize;
+        const scaleY = normalized ? height : height / inputSize;
+        const left = Math.max(0, Math.min(width, x1 * scaleX));
+        const top = Math.max(0, Math.min(height, y1 * scaleY));
+        const right = Math.max(left, Math.min(width, x2 * scaleX));
+        const bottom = Math.max(top, Math.min(height, y2 * scaleY));
+        const className = Object.keys(CUSTOM_LABELS)[classIndex];
+        if (className && right > left && bottom > top) {
+          predictions.push({
+            class: className,
+            score,
+            bbox: [left, top, right - left, bottom - top]
+          });
+        }
+      }
+      return predictions;
+    }
+
+    function applyClassWiseNms(predictions) {
+      const keptPredictions = [];
+      const classNames = [...new Set(predictions.map(prediction => prediction.class))];
+      for (const className of classNames) {
+        const remaining = predictions
+          .filter(prediction => prediction.class === className)
+          .sort((a, b) => b.score - a.score);
+        while (remaining.length) {
+          const current = remaining.shift();
+          keptPredictions.push(current);
+          const [x, y, width, height] = current.bbox;
+          const currentArea = width * height;
+          for (let index = remaining.length - 1; index >= 0; index--) {
+            const [otherX, otherY, otherWidth, otherHeight] = remaining[index].bbox;
+            const intersectionWidth = Math.max(0, Math.min(x + width, otherX + otherWidth) - Math.max(x, otherX));
+            const intersectionHeight = Math.max(0, Math.min(y + height, otherY + otherHeight) - Math.max(y, otherY));
+            const intersection = intersectionWidth * intersectionHeight;
+            const union = currentArea + otherWidth * otherHeight - intersection;
+            if (union > 0 && intersection / union > 0.45) remaining.splice(index, 1);
+          }
+        }
+      }
+      return keptPredictions.sort((a, b) => b.score - a.score);
+    }
+
+    function createOnnxModelAdapter(session) {
+      const inputName = session.inputNames[0];
+      const outputName = session.outputNames[0];
+      const inputSize = MODEL_INPUT_SIZE;
+      const inputCanvas = document.createElement('canvas');
+      inputCanvas.width = inputSize;
+      inputCanvas.height = inputSize;
+      const inputContext = inputCanvas.getContext('2d', { willReadFrequently: true });
+
+      return {
+        async detect(source) {
+          const width = source.videoWidth || source.width;
+          const height = source.videoHeight || source.height;
+          inputContext.drawImage(source, 0, 0, inputSize, inputSize);
+          const pixels = inputContext.getImageData(0, 0, inputSize, inputSize).data;
+          const inputData = new Float32Array(3 * inputSize * inputSize);
+          for (let pixel = 0; pixel < inputSize * inputSize; pixel++) {
+            inputData[pixel] = pixels[pixel * 4] / 255;
+            inputData[inputSize * inputSize + pixel] = pixels[pixel * 4 + 1] / 255;
+            inputData[2 * inputSize * inputSize + pixel] = pixels[pixel * 4 + 2] / 255;
+          }
+
+          const input = new ort.Tensor('float32', inputData, [1, 3, inputSize, inputSize]);
+          const output = (await session.run({ [inputName]: input }))[outputName];
+          const [, channels, count] = output.dims;
+          const predictions = [];
+          for (let index = 0; index < count; index++) {
+            const centerX = output.data[index];
+            const centerY = output.data[count + index];
+            const boxWidth = output.data[2 * count + index];
+            const boxHeight = output.data[3 * count + index];
+            let score = 0;
+            let classIndex = -1;
+            for (let channel = 4; channel < channels; channel++) {
+              const classScore = output.data[channel * count + index];
+              if (classScore > score) {
+                score = classScore;
+                classIndex = channel - 4;
+              }
+            }
+            if (score < 0.01 || classIndex < 0) continue;
+            const left = Math.max(0, (centerX - boxWidth / 2) * width / inputSize);
+            const top = Math.max(0, (centerY - boxHeight / 2) * height / inputSize);
+            const right = Math.min(width, (centerX + boxWidth / 2) * width / inputSize);
+            const bottom = Math.min(height, (centerY + boxHeight / 2) * height / inputSize);
+            const className = Object.keys(CUSTOM_LABELS)[classIndex];
+            if (className && right > left && bottom > top) {
+              predictions.push({ class: className, score, bbox: [left, top, right - left, bottom - top] });
+            }
+          }
+          return applyClassWiseNms(predictions.filter(prediction => prediction.score >= 0.35));
+        }
+      };
+    }
+
+    async function loadDetectionModel() {
+      if (selectedModelMode === 'coco') {
+        activeModelName = 'COCO-SSD 後備模型';
+        if (!modelPromise) modelPromise = cocoSsd.load({
+          base: 'mobilenet_v2',
+          modelUrl: './vendor/tensorflow/coco-ssd/model.json'
+        });
+        return modelPromise;
+      }
+      try {
+        const runtimeRoot = new URL('./vendor/onnxruntime/', window.location.href).href;
+        ort.env.wasm.wasmPaths = runtimeRoot;
+        const session = await ort.InferenceSession.create(CUSTOM_MODEL_URL, {
+          executionProviders: ['wasm']
+        });
+        activeModelName = '專屬 YOLO 320 ONNX 模型';
+        return createOnnxModelAdapter(session);
+      } catch (error) {
+        console.error('YOLOv11 ONNX model unavailable.', error);
+        activeModelName = 'COCO-SSD 後備模型（YOLO 未可用）';
+        if (!modelPromise) modelPromise = cocoSsd.load({
+          base: 'mobilenet_v2',
+          modelUrl: './vendor/tensorflow/coco-ssd/model.json'
+        });
+        return modelPromise;
+      }
+    }
+
+    modelModeSelect.addEventListener('change', () => {
+      selectedModelMode = modelModeSelect.value;
+      localStorage.setItem('modelMode', selectedModelMode);
+      if (!started) return;
+      stopCamera();
+      window.setTimeout(startCamera, 150);
+    });
+
+    function translateWarning(cantoneseText) {
+      const translations = {
+        '前左方有障礙物，請向右轉': {
+          'zh-CN': '前左方有障碍物，请向右转',
+          'en-US': 'There is an obstacle ahead on the left. Please turn right.'
+        },
+        '前右方有障礙物，請向左轉': {
+          'zh-CN': '前右方有障碍物，请向左转',
+          'en-US': 'There is an obstacle ahead on the right. Please turn left.'
+        },
+        '前面可能有阻擋，請放慢步伐': {
+          'zh-CN': '前方可能有障碍，请放慢脚步',
+          'en-US': 'There may be an obstruction ahead. Please slow down.'
+        }
+      };
+      return speechLanguage === 'yue-HK'
+        ? cantoneseText
+        : translations[cantoneseText]?.[speechLanguage] || cantoneseText;
+    }
+
+    function translateStartup() {
+      if (speechLanguage === 'zh-CN') return '系统已启动，开始检测';
+      if (speechLanguage === 'en-US') return 'System started. Detection is beginning.';
+      return '系統已啟動，開始偵測';
+    }
+
+    async function detectObstacle(sessionId) {
+      if (sessionId !== activeSession || !started) return;
+      lastDetectionActivity = Date.now();
+      const ctx = overlay.getContext('2d');
+      const width = video.videoWidth;
+      const height = video.videoHeight;
+      if (!width || !height || !detectionModel || detecting) {
+        scheduleDetection(sessionId);
+        return;
+      }
+
+      updateMovementRate(video);
+
+      overlay.width = width;
+      overlay.height = height;
+      if (previewEnabled) ctx.drawImage(video, 0, 0, width, height);
+      detecting = true;
+      const inferenceStart = performance.now();
+      let predictions = [];
+      let inferenceTimedOut = false;
+      try {
+        predictions = await Promise.race([
+          detectionModel.detect(video),
+          new Promise((resolve) => setTimeout(() => {
+            inferenceTimedOut = true;
+            resolve([]);
+          }, 1800))
+        ]);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        detecting = false;
+      }
+      if (inferenceTimedOut) {
+        consecutiveInferenceTimeouts++;
+        addLog('AI 推理超時，繼續下一次偵測');
+      } else {
+        consecutiveInferenceTimeouts = 0;
+      }
+      updateAdaptiveFps(performance.now() - inferenceStart);
+      if (sessionId !== activeSession || !started) return;
+      lastDetectionActivity = Date.now();
+      if (previewEnabled) {
+        ctx.clearRect(0, 0, width, height);
+        ctx.drawImage(video, 0, 0, width, height);
+      }
+
+      const visible = predictions.filter(prediction => prediction.score >= 0.58);
+      const threats = visible
+        .filter(prediction => CUSTOM_MODEL_CLASSES.has(prediction.class) || COCO_THREAT_CLASSES.has(prediction.class))
+        .sort((a, b) => {
+          const aPriority = CUSTOM_MODEL_PRIORITY[a.class] || 1;
+          const bPriority = CUSTOM_MODEL_PRIORITY[b.class] || 1;
+          return (b.score * bPriority) - (a.score * aPriority);
+        });
+
+      if (previewEnabled) visible.forEach(prediction => drawDetection(ctx, prediction));
+
+      if (threats.length > 0) {
+        obstacleActive = true;
+        detectValue.textContent = '有';
+        const now = Date.now();
+        cleanTracks(now);
+        const { track, previous } = updateTrack(threats[0], width, now);
+        const [, displayWarning] = getCantoneseWarning(threats[0], width);
+        const distance = track.distance;
+        const highRisk = track.threatLevel === 'emergency';
+        recordExperimentData({
+          objectName: CUSTOM_LABELS[threats[0].class] || threats[0].class,
+          distance: Number.isFinite(distance) ? distance : '',
+          areaExpansionRate: track.areaExpansionRate
+        });
+        distanceValue.textContent = Number.isFinite(distance) ? `${distance.toFixed(1)} m` : '--';
+        const riskText = highRisk
+          ? `面積膨脹率 ${(track.areaExpansionRate * 100).toFixed(0)}%/秒`
+          : '靜止或暫未構成碰撞威脅';
+        setRisk(highRisk ? '高風險' : '低風險', riskText);
+        lastAlert.textContent = `${highRisk ? '高風險' : '低風險'}：${displayWarning}（約 ${distance.toFixed(1)} 米）`;
+        handleAlert(track, previous, displayWarning);
+      } else {
+        recordExperimentData({ objectName: '無' });
+        if (obstacleActive) {
+          obstacleActive = false;
+          addLog('障礙物已消失');
+        }
+        detectValue.textContent = '無';
+        distanceValue.textContent = '--';
+        setRisk('安全', '目前路徑較安全');
+        lastAlert.textContent = '安全：未偵測到障礙物';
+        cleanTracks(Date.now());
+      }
+
+      scheduleDetection(sessionId);
+    }
+
+    async function startCamera() {
+      if (started) return;
+      prepareVideoForIOS();
+      warmMobileAudio();
+      started = true;
+      const sessionId = ++activeSession;
+      ensureAudioContext();
+
+      try {
+        await startOrientationTracking();
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error('Safari 不支援 getUserMedia');
+        }
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: getVideoConstraints(),
+            audio: false
+          });
+        } catch (constraintError) {
+          console.warn('640x480 camera request failed; retrying with device defaults.', constraintError);
+          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        }
+        video.srcObject = stream;
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute('playsinline', 'true');
+        video.setAttribute('webkit-playsinline', 'true');
+        try {
+          await video.play();
+        } catch (playError) {
+          console.warn('video.play() initial attempt failed on iOS, retrying shortly.', playError);
+          await new Promise(resolve => setTimeout(resolve, 300));
+          await video.play().catch(() => {});
+        }
+        previewBtn.disabled = false;
+        addLog('攝影機已啟動');
+        playStartupTone();
+        speak(translateStartup());
+        setRisk('安全', '正在載入 AI 模型');
+        detectionModel = await Promise.race([
+          loadDetectionModel(),
+          new Promise((resolve, reject) => setTimeout(() => reject(new Error('AI 模型載入逾時')), 20000))
+        ]);
+        if (sessionId !== activeSession || !started) return;
+        addLog(`${activeModelName}已載入`);
+        setRisk('安全', `${activeModelName}已就緒，正在掃描前方`);
+        if (navigator.getBattery) {
+          navigator.getBattery().then(battery => { window.currentBattery = battery; });
+        }
+        lastDetectionActivity = Date.now();
+        startWatchdog(sessionId);
+        scheduleDetection(sessionId);
+      } catch (err) {
+        console.error(err);
+        if (sessionId !== activeSession) return;
+        addLog('攝影機或 AI 模型啟動失敗');
+        setRisk('安全', '請確認鏡頭權限及網絡連線，或改用 Safari 再試一次');
+        started = false;
+      }
+    }
+
+    function prepareVideoForIOS() {
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('webkit-playsinline', 'true');
+      video.setAttribute('muted', 'true');
+      video.muted = true;
+      video.defaultMuted = true;
+      video.playsInline = true;
+    }
+
+    function getVideoConstraints() {
+      return {
+        facingMode: { ideal: 'environment' },
+        width: { ideal: 480, max: 640 },
+        height: { ideal: 360, max: 480 },
+        frameRate: { ideal: 15, max: 20 }
+      };
+    }
+
+    function warmMobileAudio() {
+      ensureAudioContext();
+      if ('speechSynthesis' in window) {
+        const silentUtterance = new SpeechSynthesisUtterance(' ');
+        silentUtterance.volume = 0;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(silentUtterance);
+      }
+    }
+
+    function stopCamera() {
+      started = false;
+      activeSession++;
+      obstacleActive = false;
+      lastTriggerTime = 0;
+      if (animationId) cancelAnimationFrame(animationId);
+      if (animationId) clearTimeout(animationId);
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      watchdogTimer = null;
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+        video.srcObject = null;
+      }
+      const ctx = overlay.getContext('2d');
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      video.removeAttribute('src');
+      video.load();
+      prevFrame = null;
+      detectionModel = null;
+      detecting = false;
+      trackedObstacles.clear();
+      previousMotionData = null;
+      movementRate = 0;
+      if (audioContext && audioContext.state === 'running') audioContext.suspend();
+      previewEnabled = false;
+      cameraBox.classList.add('preview-hidden');
+      previewBtn.disabled = true;
+      previewBtn.textContent = '預覽畫面';
+      nextDetectionDelay = FIXED_DETECTION_DELAY;
+      distanceValue.textContent = '--';
+      fpsValue.textContent = '--';
+      setRisk('安全', '系統已就緒');
+      statusText.textContent = '待機中';
+      detectValue.textContent = '無';
+      warningText.textContent = '系統已就緒';
+      lastAlert.textContent = '尚未偵測';
+      log.replaceChildren();
+      kimiBusy = false;
+      kimiStatus.textContent = '輸入 API key 後，可按鈕或快速點擊螢幕兩下分析環境。';
+    }
+
+    previewBtn.addEventListener('click', () => {
+      previewEnabled = !previewEnabled;
+      cameraBox.classList.toggle('preview-hidden', !previewEnabled);
+      previewBtn.textContent = previewEnabled ? '隱藏畫面' : '預覽畫面';
+      if (!previewEnabled) {
+        const ctx = overlay.getContext('2d');
+        ctx.clearRect(0, 0, overlay.width, overlay.height);
+      }
+    });
+
+    let lastKimiTouchTime = 0;
+    document.addEventListener('touchstart', event => {
+      if (event.touches.length !== 1) return;
+      if (event.target.closest('input, select, button, textarea')) return;
+      const now = Date.now();
+      if (now - lastKimiTouchTime < 350) {
+        event.preventDefault();
+        lastKimiTouchTime = 0;
+        void askKimiForScene();
+        return;
+      }
+      lastKimiTouchTime = now;
+    }, { passive: false });
+
+    document.addEventListener('touchstart', warmMobileAudio, { passive: true, once: true });
+    document.addEventListener('pointerdown', warmMobileAudio, { passive: true, once: true });
+    document.getElementById('startBtn').addEventListener('click', startCamera);
+    document.getElementById('stopBtn').addEventListener('click', stopCamera);
+    exportBtn.addEventListener('click', exportExperimentData);
+    calibrateBtn.addEventListener('click', calibrateCamera);
+    cameraPresetSelect.addEventListener('change', () => {
+      if (cameraPresetSelect.value !== 'custom') applyCameraPreset(cameraPresetSelect.value);
+    });
+    loadCalibration();
+
+    if ('serviceWorker' in navigator && window.isSecureContext) {
+      navigator.serviceWorker.register('./sw.js').catch(error => {
+        console.warn('PWA service worker unavailable.', error);
+      });
+    }
+  </script>
+</body>
+</html>

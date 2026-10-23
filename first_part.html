@@ -340,8 +340,11 @@
 
         <div class="calibration">
           <strong>相機校準</strong>
-          <span class="small">請讓完整物件出現在鏡頭中央，再輸入實際尺寸。</span>
+          <span class="small">地面障礙物改用「地面幾何公式」測距（只需相機高度），半空物件才用高度公式。校準時請讓完整物件出現在鏡頭中央。</span>
           <div class="calibration-controls">
+            <label>相機高度（米）
+              <input id="cameraHeightInput" type="number" min="0.5" max="2.5" step="0.05" value="1.3">
+            </label>
             <label>手機預設
               <select id="cameraPresetSelect" class="language-select">
                 <option value="default">通用預設（60°）</option>
@@ -446,6 +449,7 @@
     const exportBtn = document.getElementById('exportBtn');
     const knownHeightInput = document.getElementById('knownHeightInput');
     const knownDistanceInput = document.getElementById('knownDistanceInput');
+    const cameraHeightInput = document.getElementById('cameraHeightInput');
     const calibrateBtn = document.getElementById('calibrateBtn');
     const calibrationStatus = document.getElementById('calibrationStatus');
     const languageSelect = document.getElementById('languageSelect');
@@ -487,6 +491,20 @@
     let kimiLastRequest = 0;
     const KIMI_COOLDOWN_MS = 2000;
     const experimentRecords = [];
+    let cameraHeightMeters = Number(localStorage.getItem('cameraHeightMeters')) || 1.3;
+    cameraHeightInput.value = cameraHeightMeters;
+    cameraHeightInput.addEventListener('change', () => {
+      const value = Number(cameraHeightInput.value);
+      cameraHeightMeters = value > 0 ? value : 0;
+      localStorage.setItem('cameraHeightMeters', String(cameraHeightMeters));
+      addLog(`相機高度設為 ${cameraHeightMeters.toFixed(2)} 米`);
+    });
+    const learnedHeights = {};
+    try {
+      Object.assign(learnedHeights, JSON.parse(localStorage.getItem('learnedHeights') || '{}'));
+    } catch (error) { /* 忽略損壞的學習資料 */ }
+    const distanceHistory = new Map();
+    const DISTANCE_HISTORY_SIZE = 5;
 
     const CUSTOM_MODEL_URL = './models/obstacle-yolo/yolov11best.onnx';
     const MODEL_INPUT_SIZE = 320;
@@ -716,11 +734,13 @@
     function getScenePartition(frameWidth, frameHeight) {
       const verticalFocalLength = getVerticalFocalLengthPixels(frameWidth, frameHeight);
       const pitchRadians = devicePitchDeg * Math.PI / 180;
-      const horizonY = frameHeight / 2 - Math.tan(pitchRadians) * verticalFocalLength;
+      // devicePitchDeg 往下傾時為「負數」：往下看時水平線與分區線都要上移，
+      // 因此三個公式都必須「加 pitchRadians」（原 2.0 版的正負號是反的）。
+      const horizonY = frameHeight / 2 + Math.tan(pitchRadians) * verticalFocalLength;
       const groundBoundaryY = frameHeight / 2
-        + Math.tan((5 * Math.PI / 180) - pitchRadians) * verticalFocalLength;
+        + Math.tan((5 * Math.PI / 180) + pitchRadians) * verticalFocalLength;
       const headChestBoundaryY = frameHeight / 2
-        + Math.tan((-5 * Math.PI / 180) - pitchRadians) * verticalFocalLength;
+        + Math.tan((-5 * Math.PI / 180) + pitchRadians) * verticalFocalLength;
       const verticalFovDeg = 2 * Math.atan(frameHeight / (2 * verticalFocalLength)) * 180 / Math.PI;
       return { horizonY, groundBoundaryY, headChestBoundaryY, verticalFovDeg };
     }
@@ -791,8 +811,10 @@
         localStorage.setItem('cameraFocalLengthPixels', String(cameraFocalLengthPixels));
         localStorage.setItem('cameraHorizontalFovDeg', String(calibratedFov));
         localStorage.setItem('cameraPreset', 'custom');
+        learnedHeights[candidate.class] = knownHeight;
+        localStorage.setItem('learnedHeights', JSON.stringify(learnedHeights));
         cameraPresetSelect.value = 'custom';
-        calibrationStatus.textContent = `校準完成：視角約 ${calibratedFov.toFixed(1)}°，距離估算已更新。`;
+        calibrationStatus.textContent = `校準完成：視角約 ${calibratedFov.toFixed(1)}°，並已記錄「${CUSTOM_LABELS[candidate.class] || candidate.class}」實際高度 ${knownHeight.toFixed(2)} 米。`;
         addLog(`相機校準完成，視角 ${calibratedFov.toFixed(1)}°`);
       } catch (error) {
         console.error(error);
@@ -812,13 +834,15 @@
       }
     }
 
-    function recordExperimentData({ objectName = '', distance = '', areaExpansionRate = 0 }) {
+    function recordExperimentData({ objectName = '', distance = '', distanceRaw = '', distanceSource = '', areaExpansionRate = 0 }) {
       experimentRecords.push({
         time: new Date().toISOString(),
         pitch: devicePitchDeg,
         fps: 1000 / Math.max(1, nextDetectionDelay),
         object: objectName,
         distance,
+        distanceRaw,
+        distanceSource,
         areaExpansionRate
       });
       exportBtn.classList.add('ready');
@@ -831,13 +855,15 @@
 
     function exportExperimentData() {
       if (!experimentRecords.length) return;
-      const headers = ['Time', 'Pitch', 'FPS', 'Object', 'Distance', 'TTC (areaExpansionRate)'];
+      const headers = ['Time', 'Pitch', 'FPS', 'Object', 'Distance', 'DistanceRaw', 'DistanceSource', 'TTC (areaExpansionRate)'];
       const rows = experimentRecords.map(record => [
         record.time,
         `${record.pitch.toFixed(2)}°`,
         record.fps.toFixed(2),
         record.object,
         record.distance === '' ? '' : Number(record.distance).toFixed(2),
+        record.distanceRaw === '' ? '' : Number(record.distanceRaw).toFixed(2),
+        record.distanceSource,
         `${(record.areaExpansionRate * 100).toFixed(2)}%/s`
       ]);
       const csv = [headers, ...rows]
@@ -959,8 +985,9 @@
       const [x, y, width, height] = prediction.bbox;
       const centerX = x + width / 2;
       const centerY = y + height / 2;
-      const distance = estimateDistanceMeters(prediction, frameWidth);
       const sceneZone = getSceneZone(prediction, frameWidth, video.videoHeight);
+      const distanceInfo = estimateDistanceInfo(prediction, frameWidth, video.videoHeight);
+      const distance = smoothDistance(key, distanceInfo.distance);
       const area = Math.max(1, width * height);
       const previous = trackedObstacles.get(key);
       const elapsedSeconds = previous ? Math.max(0.05, (now - previous.time) / 1000) : null;
@@ -974,7 +1001,9 @@
       const track = {
         key, time: now, centerX, centerY, distance, sceneZone, area, areaExpansionRate, threatLevel,
         direction: getDirection(prediction, frameWidth),
-        className: prediction.class
+        className: prediction.class,
+        rawDistance: distanceInfo.distance,
+        distanceSource: distanceInfo.source
       };
       trackedObstacles.set(key, track);
       return { track, previous };
@@ -982,7 +1011,10 @@
 
     function cleanTracks(now) {
       for (const [key, track] of trackedObstacles) {
-        if (now - track.time > TRACK_TIMEOUT_MS) trackedObstacles.delete(key);
+        if (now - track.time > TRACK_TIMEOUT_MS) {
+          trackedObstacles.delete(key);
+          distanceHistory.delete(key);
+        }
       }
     }
 
@@ -1088,7 +1120,17 @@
     function drawDetection(ctx, prediction) {
       const [x, y, width, height] = prediction.bbox;
       const isThreat = CUSTOM_MODEL_CLASSES.has(prediction.class);
-      const distance = estimateDistanceMeters(prediction, ctx.canvas.width);
+      // 優先使用追蹤器裡「已平滑」的距離，讓預覽數字與右側面板一致；
+      // 沒有追蹤記錄時才用即時估算值
+      const trackKey = objectTrackKey(prediction, ctx.canvas.width);
+      const cachedTrack = trackedObstacles.get(trackKey);
+      let distanceInfo;
+      if (cachedTrack && Date.now() - cachedTrack.time <= TRACK_TIMEOUT_MS) {
+        distanceInfo = { distance: cachedTrack.distance, source: cachedTrack.distanceSource };
+      } else {
+        distanceInfo = estimateDistanceInfo(prediction, ctx.canvas.width, ctx.canvas.height);
+      }
+      const distance = distanceInfo.distance;
       const sceneZone = getSceneZone(prediction, ctx.canvas.width, ctx.canvas.height);
       const label = CUSTOM_LABELS[prediction.class] || prediction.class;
       ctx.strokeStyle = isThreat ? '#ef4444' : '#22c55e';
@@ -1097,7 +1139,8 @@
       ctx.fillStyle = isThreat ? '#ef4444' : '#22c55e';
       ctx.font = 'bold 18px Microsoft JhengHei';
       const distanceText = Number.isFinite(distance) ? `${distance.toFixed(1)}m` : '--';
-      ctx.fillText(`${label} ${sceneZone.label} ${Math.round(prediction.score * 100)}% | ${distanceText}`, x + 6, Math.max(22, y - 8));
+      const sourceMark = distanceInfo.source === 'ground' ? '(地面)' : '(高度)';
+      ctx.fillText(`${label} ${sceneZone.label} ${Math.round(prediction.score * 100)}% | ${distanceText}${sourceMark}`, x + 6, Math.max(22, y - 8));
     }
 
     function drawScenePartition(ctx, width, height) {
@@ -1117,23 +1160,110 @@
       ctx.stroke();
       ctx.restore();
     }
-function estimateDistanceMeters(prediction, frameWidth) {
-      // 檢查目前看著的物件，是否為剛才校準的目標類別
+    // 明確定義「絕對不貼地」的半空懸掛物，防止框太大跨入地面區時誤用地面公式
+    const AIRBORNE_CLASSES = new Set([
+      'hanging_branc',
+      'protruding_signboard',
+      'balcony_cage'
+    ]);
+
+    function getClassRealHeight(className) {
+      const learned = Number(learnedHeights[className]);
+      if (learned > 0) return learned;
+      return CUSTOM_MODEL_HEIGHTS[className] || KNOWN_HEIGHT_METERS[className];
+    }
+
+    function groundPlaneDistanceMeters(bottomY, frameWidth, frameHeight) {
+      if (cameraHeightMeters <= 0 || !frameWidth || !frameHeight) return null;
+      // 防呆：框底貼近畫面最下緣，代表接地點已被切出畫面，不能用地面公式
+      if (bottomY >= frameHeight - 6) return null;
+
+      const verticalFocal = getVerticalFocalLengthPixels(frameWidth, frameHeight);
+      const pitchRadians = devicePitchDeg * Math.PI / 180;
+      const angleBelowAxis = Math.atan((bottomY - frameHeight / 2) / verticalFocal);
+
+      // ★ 關鍵修正：devicePitchDeg 往下傾時為「負數」，
+      // 所以俯角 = 光軸下偏角 - pitchRadians（減去負數 = 加上低頭量）
+      const depressionAngle = angleBelowAxis - pitchRadians;
+
+      // 俯角太小（接近水平線）時 tan 誤差會急遽放大，退回高度公式
+      if (depressionAngle < (4 * Math.PI / 180)) return null;
+
+      const distance = cameraHeightMeters / Math.tan(depressionAngle);
+      if (!Number.isFinite(distance) || distance <= 0.2 || distance > 25) return null;
+      // 沒有陀螺儀數據時 pitch 假設為 0，遠處距離對傾斜誤差太敏感，交給高度公式
+      if (!orientationAvailable && distance > 8) return null;
+      return distance;
+    }
+
+    function learnClassHeight(prediction, frameWidth, frameHeight, groundDistance) {
+      // 只在陀螺儀有效、距離適中（1m ~ 8m）且高信心度時才學習，避免把誤差學進去
+      if (!orientationAvailable || prediction.score < 0.65 || groundDistance < 1.0 || groundDistance > 8.0) return;
+      const [x, y, width, height] = prediction.bbox;
+      // 確保物體上下左右都沒有被畫面邊緣切掉（完整入鏡才學習）
+      if (x <= 6 || y <= 6 || x + width >= frameWidth - 6 || y + height >= frameHeight - 6) return;
+
+      const defaultHeight = CUSTOM_MODEL_HEIGHTS[prediction.class] || KNOWN_HEIGHT_METERS[prediction.class];
+      if (!defaultHeight) return;
+
+      const focalLengthPixels = getFocalLengthPixels(frameWidth);
+      const pitchCompensation = Math.max(0.15, Math.cos(devicePitchDeg * Math.PI / 180));
+      const measuredHeight = (height * groundDistance) / (focalLengthPixels * pitchCompensation);
+
+      if (measuredHeight < defaultHeight * 0.5 || measuredHeight > defaultHeight * 1.6) return;
+      const previous = Number(learnedHeights[prediction.class]) || 0;
+      const nextHeight = previous > 0 ? previous * 0.8 + measuredHeight * 0.2 : measuredHeight;
+      learnedHeights[prediction.class] = Math.round(nextHeight * 100) / 100;
+      localStorage.setItem('learnedHeights', JSON.stringify(learnedHeights));
+      if (previous === 0) {
+        addLog(`已學習「${CUSTOM_LABELS[prediction.class] || prediction.class}」實際高度約 ${learnedHeights[prediction.class].toFixed(2)} 米`);
+      }
+    }
+
+    function estimateDistanceInfo(prediction, frameWidth, frameHeight) {
+      const [, y, , height] = prediction.bbox;
+      const bottomY = y + height;
+      const sceneZone = getSceneZone(prediction, frameWidth, frameHeight);
+
+      // 先算傳統高度公式距離當作保底
       const isCalibratedTarget = (window.activeCalibratedClass && prediction.class === window.activeCalibratedClass);
-      
-      // 如果是校準目標，優先使用介面上的高度；否則使用預設高度
-      const realHeight = isCalibratedTarget 
-          ? Number(document.getElementById('knownHeightInput').value) 
-          : (CUSTOM_MODEL_HEIGHTS[prediction.class] || KNOWN_HEIGHT_METERS[prediction.class]);
-          
-      const pixelHeight = prediction.bbox[3];
-      if (!realHeight || !pixelHeight || !frameWidth) return Infinity;
-      
+      const realHeight = isCalibratedTarget
+        ? Number(knownHeightInput.value)
+        : getClassRealHeight(prediction.class);
       const focalLengthPixels = getFocalLengthPixels(frameWidth);
       const pitchRadians = devicePitchDeg * Math.PI / 180;
       const pitchCompensation = Math.max(0.15, Math.cos(pitchRadians));
-      
-      return (realHeight * focalLengthPixels * pitchCompensation) / pixelHeight;
+      const heightDistance = (realHeight && height && frameWidth)
+        ? (realHeight * focalLengthPixels * pitchCompensation) / height
+        : Infinity;
+
+      // 只要不是半空懸掛物，且位於地面區，就優先使用地面幾何公式
+      if (!AIRBORNE_CLASSES.has(prediction.class) && sceneZone.name === 'ground') {
+        const groundDistance = groundPlaneDistanceMeters(bottomY, frameWidth, frameHeight);
+        if (groundDistance !== null) {
+          learnClassHeight(prediction, frameWidth, frameHeight, groundDistance);
+          return { distance: groundDistance, source: 'ground' };
+        }
+      }
+
+      return { distance: heightDistance, source: 'height' };
+    }
+
+    function estimateDistanceMeters(prediction, frameWidth, frameHeight) {
+      return estimateDistanceInfo(prediction, frameWidth, frameHeight).distance;
+    }
+
+    function smoothDistance(key, distance) {
+      if (!Number.isFinite(distance)) return distance;
+      let history = distanceHistory.get(key);
+      if (!history) {
+        history = [];
+        distanceHistory.set(key, history);
+      }
+      history.push(distance);
+      while (history.length > DISTANCE_HISTORY_SIZE) history.shift();
+      const sorted = [...history].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)];
     }
     function updateMovementRate(source) {
       motionContext.drawImage(source, 0, 0, motionCanvas.width, motionCanvas.height);
@@ -1408,6 +1538,7 @@ function estimateDistanceMeters(prediction, frameWidth) {
       if (previewEnabled) {
         ctx.clearRect(0, 0, width, height);
         ctx.drawImage(video, 0, 0, width, height);
+        drawScenePartition(ctx, width, height);
       }
 
       const visible = predictions.filter(prediction => prediction.score >= 0.58);
@@ -1418,8 +1549,6 @@ function estimateDistanceMeters(prediction, frameWidth) {
           const bPriority = CUSTOM_MODEL_PRIORITY[b.class] || 1;
           return (b.score * bPriority) - (a.score * aPriority);
         });
-
-      if (previewEnabled) visible.forEach(prediction => drawDetection(ctx, prediction));
 
       if (threats.length > 0) {
         obstacleActive = true;
@@ -1433,6 +1562,8 @@ function estimateDistanceMeters(prediction, frameWidth) {
         recordExperimentData({
           objectName: CUSTOM_LABELS[threats[0].class] || threats[0].class,
           distance: Number.isFinite(distance) ? distance : '',
+          distanceRaw: Number.isFinite(track.rawDistance) ? track.rawDistance : '',
+          distanceSource: track.distanceSource || '',
           areaExpansionRate: track.areaExpansionRate
         });
         distanceValue.textContent = Number.isFinite(distance) ? `${distance.toFixed(1)} m` : '--';
@@ -1454,6 +1585,8 @@ function estimateDistanceMeters(prediction, frameWidth) {
         lastAlert.textContent = '安全：未偵測到障礙物';
         cleanTracks(Date.now());
       }
+
+      if (previewEnabled) visible.forEach(prediction => drawDetection(ctx, prediction));
 
       scheduleDetection(sessionId);
     }
@@ -1571,6 +1704,7 @@ function estimateDistanceMeters(prediction, frameWidth) {
       detectionModel = null;
       detecting = false;
       trackedObstacles.clear();
+      distanceHistory.clear();
       previousMotionData = null;
       movementRate = 0;
       if (audioContext && audioContext.state === 'running') audioContext.suspend();

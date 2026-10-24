@@ -1,4 +1,4 @@
-const CACHE_NAME = 'macau-guide-v8';
+const CACHE_NAME = 'macau-guide-v14';
 const APP_SHELL = [
   './',
   './index.html',
@@ -15,7 +15,8 @@ const APP_SHELL = [
   './vendor/tensorflow/coco-ssd/group1-shard3of5',
   './vendor/tensorflow/coco-ssd/group1-shard4of5',
   './vendor/tensorflow/coco-ssd/group1-shard5of5',
-  './models/obstacle-yolo/yolov11best.onnx'
+  './models/obstacle-yolo/yolov11best.onnx',
+  './vendor/depth-anything/model_quantized.onnx'
 ];
 const CACHEABLE_EXTERNAL_HOSTS = new Set([
   'storage.googleapis.com',

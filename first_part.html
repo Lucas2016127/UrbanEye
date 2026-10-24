@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>UrbanEye</title>
+  <link rel="manifest" href="./manifest.json" />
+  <meta name="theme-color" content="#07111f" />
   <style>
     :root {
       --bg: #07111f;
@@ -361,7 +363,12 @@
               <input id="knownDistanceInput" type="number" min="0.3" max="20" step="0.1" value="2.0">
             </label>
             <button id="calibrateBtn" type="button">拍攝並校準</button>
+            <label>實際距離（米）
+              <input id="groundTruthInput" type="number" min="0.3" max="20" step="0.05" placeholder="捲尺實測值">
+            </label>
+            <button id="markGroundTruthBtn" type="button">標記真值</button>
           </div>
+          <div id="groundTruthStatus" class="small">實驗模式：輸入捲尺實測距離後按「標記真值」，會把估算誤差寫進 CSV。</div>
           <div id="calibrationStatus" class="small">目前使用預設視角 60°</div>
         </div>
 
@@ -452,6 +459,9 @@
     const cameraHeightInput = document.getElementById('cameraHeightInput');
     const calibrateBtn = document.getElementById('calibrateBtn');
     const calibrationStatus = document.getElementById('calibrationStatus');
+    const groundTruthInput = document.getElementById('groundTruthInput');
+    const markGroundTruthBtn = document.getElementById('markGroundTruthBtn');
+    const groundTruthStatus = document.getElementById('groundTruthStatus');
     const languageSelect = document.getElementById('languageSelect');
     const voiceStatus = document.getElementById('voiceStatus');
     const kimiApiKey = document.getElementById('kimiApiKey');
@@ -468,6 +478,7 @@
     let lastTriggerTime = 0;
     let detectionModel = null;
     let modelPromise = null;
+    let yoloModelCache = null;
     let detecting = false;
     let activeSession = 0;
     let nextDetectionDelay = 1000 / 10;
@@ -505,6 +516,32 @@
     } catch (error) { /* 忽略損壞的學習資料 */ }
     const distanceHistory = new Map();
     const DISTANCE_HISTORY_SIZE = 5;
+    const DISTANCE_EMERGENCY_METERS = 1.2;
+    const DISTANCE_WARNING_METERS = 2.5;
+    let lastDistancePulseTime = 0;
+    let lastEstimatedDistance = null;
+    let lastDetectedObject = '';
+    // ── Depth Anything 深度輔助 ──
+    const DEPTH_MODEL_URL = './vendor/depth-anything/model_quantized.onnx';
+    const DEPTH_INPUT_SIZE = 252;
+    const DEPTH_MEAN = [0.485, 0.456, 0.406];
+    const DEPTH_STD = [0.229, 0.224, 0.225];
+    const DEPTH_FRESH_MS = 1500;
+    const DEPTH_SLOW_MS = 450;
+    const DEPTH_MIN_BRIGHTNESS = 22;
+    let depthSession = null;
+    let depthProvider = null;
+    let depthInputWidth = 0;
+    let depthInputHeight = 0;
+    let latestDepthRaw = null;
+    let latestDepthTime = 0;
+    let latestDepthBrightness = 0;
+    let depthBusy = false;
+    let depthLastRunTime = 0;
+    let depthInferenceMs = 0;
+    let depthDisabled = false;
+    let depthDisabledReason = '';
+    let depthScaleFactor = Number(localStorage.getItem('depthScaleFactor')) || 0;
 
     const CUSTOM_MODEL_URL = './models/obstacle-yolo/yolov11best.onnx';
     const MODEL_INPUT_SIZE = 320;
@@ -814,7 +851,23 @@
         learnedHeights[candidate.class] = knownHeight;
         localStorage.setItem('learnedHeights', JSON.stringify(learnedHeights));
         cameraPresetSelect.value = 'custom';
-        calibrationStatus.textContent = `校準完成：視角約 ${calibratedFov.toFixed(1)}°，並已記錄「${CUSTOM_LABELS[candidate.class] || candidate.class}」實際高度 ${knownHeight.toFixed(2)} 米。`;
+        // 深度比例校準（有深度模型時）：反推 depthScaleFactor，讓深度圖輸出轉成公尺
+        let depthCalibrated = false;
+        if (!depthDisabled && depthSession) {
+          try {
+            await waitForDepthIdle();
+            await runDepthInference();
+            const disparity = medianDisparityForBox(candidate, video.videoWidth, video.videoHeight);
+            if (disparity !== null && disparity > 0) {
+              depthScaleFactor = knownDistance * disparity;
+              localStorage.setItem('depthScaleFactor', String(depthScaleFactor));
+              depthCalibrated = true;
+            }
+          } catch (error) {
+            console.warn('Depth calibration skipped.', error);
+          }
+        }
+        calibrationStatus.textContent = `校準完成：視角約 ${calibratedFov.toFixed(1)}°，並已記錄「${CUSTOM_LABELS[candidate.class] || candidate.class}」實際高度 ${knownHeight.toFixed(2)} 米。${depthCalibrated ? ' 深度比例已校準。' : ''}`;
         addLog(`相機校準完成，視角 ${calibratedFov.toFixed(1)}°`);
       } catch (error) {
         console.error(error);
@@ -834,7 +887,7 @@
       }
     }
 
-    function recordExperimentData({ objectName = '', distance = '', distanceRaw = '', distanceSource = '', areaExpansionRate = 0 }) {
+    function recordExperimentData({ objectName = '', distance = '', distanceRaw = '', distanceSource = '', groundTruth = '', errorPct = '', areaExpansionRate = 0 }) {
       experimentRecords.push({
         time: new Date().toISOString(),
         pitch: devicePitchDeg,
@@ -843,6 +896,8 @@
         distance,
         distanceRaw,
         distanceSource,
+        groundTruth,
+        errorPct,
         areaExpansionRate
       });
       exportBtn.classList.add('ready');
@@ -855,7 +910,7 @@
 
     function exportExperimentData() {
       if (!experimentRecords.length) return;
-      const headers = ['Time', 'Pitch', 'FPS', 'Object', 'Distance', 'DistanceRaw', 'DistanceSource', 'TTC (areaExpansionRate)'];
+      const headers = ['Time', 'Pitch', 'FPS', 'Object', 'Distance', 'DistanceRaw', 'DistanceSource', 'GroundTruth', 'ErrorPct', 'TTC (areaExpansionRate)'];
       const rows = experimentRecords.map(record => [
         record.time,
         `${record.pitch.toFixed(2)}°`,
@@ -864,6 +919,8 @@
         record.distance === '' ? '' : Number(record.distance).toFixed(2),
         record.distanceRaw === '' ? '' : Number(record.distanceRaw).toFixed(2),
         record.distanceSource,
+        record.groundTruth === '' || record.groundTruth == null ? '' : Number(record.groundTruth).toFixed(2),
+        record.errorPct === '' || record.errorPct == null ? '' : Number(record.errorPct).toFixed(1),
         `${(record.areaExpansionRate * 100).toFixed(2)}%/s`
       ]);
       const csv = [headers, ...rows]
@@ -995,11 +1052,16 @@
         ? (area - previous.area) / previous.area / elapsedSeconds
         : 0;
       const corridor = centerX > frameWidth * 0.25 && centerX < frameWidth * 0.75;
-      const threatLevel = corridor && areaExpansionRate >= AREA_EXPANSION_EMERGENCY_RATE
-        ? 'emergency'
+      const approachingFast = corridor && areaExpansionRate >= AREA_EXPANSION_EMERGENCY_RATE;
+      const distanceTier = Number.isFinite(distance)
+        ? (distance < DISTANCE_EMERGENCY_METERS
+            ? 'emergency'
+            : distance < DISTANCE_WARNING_METERS ? 'warning' : 'ambient')
         : 'ambient';
+      const threatLevel = approachingFast ? 'emergency' : distanceTier;
+      const threatReason = approachingFast ? 'approach' : distanceTier === 'ambient' ? 'ambient' : 'distance';
       const track = {
-        key, time: now, centerX, centerY, distance, sceneZone, area, areaExpansionRate, threatLevel,
+        key, time: now, centerX, centerY, distance, sceneZone, area, areaExpansionRate, threatLevel, threatReason,
         direction: getDirection(prediction, frameWidth),
         className: prediction.class,
         rawDistance: distanceInfo.distance,
@@ -1044,24 +1106,59 @@
       }, 2000);
     }
 
+    function triggerDistancePulse(distance) {
+      try {
+        if (!('vibrate' in navigator)) return;
+        const now = Date.now();
+        const interval = Math.max(700, Math.min(2200, distance * 600));
+        if (now - lastDistancePulseTime < interval) return;
+        lastDistancePulseTime = now;
+        navigator.vibrate([60]);
+      } catch (error) {
+        console.warn('Distance pulse unavailable.', error);
+      }
+    }
+
     function handleAlert(track, previous, displayWarning) {
       try {
         const becameEmergency = track.threatLevel === 'emergency'
           && (!previous || previous.threatLevel !== 'emergency');
+        const becameWarning = track.threatLevel === 'warning'
+          && (!previous || previous.threatLevel === 'ambient');
         if (becameEmergency) {
           const translatedWarning = translateWarning(displayWarning);
-          const emergencyText = speechLanguage === 'en-US'
-            ? 'The obstacle is rapidly approaching. Stop immediately.'
-            : speechLanguage === 'zh-CN'
-              ? '前方障礙物正在快速接近，請立即停下。'
-              : '前面障礙物正在快速接近，請即刻停低。';
+          const emergencyText = track.threatReason === 'distance'
+            ? (speechLanguage === 'en-US'
+                ? 'Obstacle is too close ahead. Stop immediately.'
+                : speechLanguage === 'zh-CN'
+                  ? '前方障碍物太近，请立即停下。'
+                  : '前面障礙物太近，請即刻停低。')
+            : (speechLanguage === 'en-US'
+                ? 'The obstacle is rapidly approaching. Stop immediately.'
+                : speechLanguage === 'zh-CN'
+                  ? '前方障礙物正在快速接近，請立即停下。'
+                  : '前面障礙物正在快速接近，請即刻停低。');
           speak(`${emergencyText} ${translatedWarning}`);
           playDirectionTone(track.direction, true);
           triggerEmergencyVibration();
-          addLog(`緊急警報：面積膨脹率 ${(track.areaExpansionRate * 100).toFixed(0)}%/秒`);
+          addLog(`緊急警報：${track.threatReason === 'distance' ? '距離過近' : `面積膨脹率 ${(track.areaExpansionRate * 100).toFixed(0)}%/秒`}`);
+        } else if (becameWarning) {
+          const distanceText = Number.isFinite(track.distance) ? track.distance.toFixed(1) : '';
+          const warningText = speechLanguage === 'en-US'
+            ? `Obstacle about ${distanceText} meters ahead. Please slow down.`
+            : speechLanguage === 'zh-CN'
+              ? `前方约${distanceText}米有障碍物，请放慢。`
+              : `前面約${distanceText}米有障礙物，請放慢。`;
+          speak(warningText);
+          playDirectionTone(track.direction, true);
+          addLog(`距離警示：${distanceText} 米內有障礙物`);
         } else if (!previous || previous.threatLevel !== 'ambient') {
           playDirectionTone(track.direction);
           addLog(`環境音提示：${track.direction === 'left' ? '左方' : track.direction === 'right' ? '右方' : '正前方'}`);
+        }
+        // 距離節奏震動：愈近脈衝愈密（倒車雷達式觸覺提示）
+        if (track.threatLevel !== 'ambient' && Number.isFinite(track.distance)) {
+          triggerDistancePulse(track.distance);
         }
       } catch (error) {
         console.warn('Alert handling failed; detection will continue.', error);
@@ -1139,7 +1236,8 @@
       ctx.fillStyle = isThreat ? '#ef4444' : '#22c55e';
       ctx.font = 'bold 18px Microsoft JhengHei';
       const distanceText = Number.isFinite(distance) ? `${distance.toFixed(1)}m` : '--';
-      const sourceMark = distanceInfo.source === 'ground' ? '(地面)' : '(高度)';
+      const sourceMark = distanceInfo.source === 'ground' ? '(地面)'
+        : distanceInfo.source === 'depth' ? '(深度)' : '(高度)';
       ctx.fillText(`${label} ${sceneZone.label} ${Math.round(prediction.score * 100)}% | ${distanceText}${sourceMark}`, x + 6, Math.max(22, y - 8));
     }
 
@@ -1196,9 +1294,9 @@
       return distance;
     }
 
-    function learnClassHeight(prediction, frameWidth, frameHeight, groundDistance) {
-      // 只在陀螺儀有效、距離適中（1m ~ 8m）且高信心度時才學習，避免把誤差學進去
-      if (!orientationAvailable || prediction.score < 0.65 || groundDistance < 1.0 || groundDistance > 8.0) return;
+    function learnClassHeight(prediction, frameWidth, frameHeight, groundDistance, requireOrientation = true) {
+      // 地面公式來源需要陀螺儀；深度來源不需要。距離適中（1m ~ 8m）且高信心度才學習
+      if ((requireOrientation && !orientationAvailable) || prediction.score < 0.65 || groundDistance < 1.0 || groundDistance > 8.0) return;
       const [x, y, width, height] = prediction.bbox;
       // 確保物體上下左右都沒有被畫面邊緣切掉（完整入鏡才學習）
       if (x <= 6 || y <= 6 || x + width >= frameWidth - 6 || y + height >= frameHeight - 6) return;
@@ -1241,9 +1339,20 @@
       if (!AIRBORNE_CLASSES.has(prediction.class) && sceneZone.name === 'ground') {
         const groundDistance = groundPlaneDistanceMeters(bottomY, frameWidth, frameHeight);
         if (groundDistance !== null) {
-          learnClassHeight(prediction, frameWidth, frameHeight, groundDistance);
+          learnClassHeight(prediction, frameWidth, frameHeight, groundDistance, true);
           return { distance: groundDistance, source: 'ground' };
         }
+      }
+
+      // 深度輔助（有深度圖與比例校準時）：半空區權重 0.7、過渡區 0.5，與高度公式融合
+      const depthDistance = depthDistanceForBox(prediction, frameWidth, frameHeight);
+      if (depthDistance !== null) {
+        const depthWeight = sceneZone.name === 'headChest' ? 0.7 : 0.5;
+        const fused = Number.isFinite(heightDistance)
+          ? depthWeight * depthDistance + (1 - depthWeight) * heightDistance
+          : depthDistance;
+        learnClassHeight(prediction, frameWidth, frameHeight, depthDistance, false);
+        return { distance: fused, source: 'depth' };
       }
 
       return { distance: heightDistance, source: 'height' };
@@ -1431,6 +1540,135 @@
       };
     }
 
+    // ── Depth Anything 深度模型 ──
+    async function loadDepthModel() {
+      if (depthDisabled || depthSession) return;
+      const runtimeRoot = new URL('./vendor/onnxruntime/', window.location.href).href;
+      ort.env.wasm.wasmPaths = runtimeRoot;
+      try {
+        try {
+          depthSession = await ort.InferenceSession.create(DEPTH_MODEL_URL, { executionProviders: ['webgpu'] });
+          depthProvider = 'webgpu';
+        } catch (webgpuError) {
+          console.warn('Depth model WebGPU unavailable, falling back to WASM.', webgpuError);
+          depthSession = await ort.InferenceSession.create(DEPTH_MODEL_URL, { executionProviders: ['wasm'] });
+          depthProvider = 'wasm';
+        }
+        addLog(`深度模型已載入（${depthProvider.toUpperCase()}），輔助測距啟用`);
+      } catch (error) {
+        console.error('Depth model unavailable.', error);
+        depthDisabled = true;
+        depthDisabledReason = 'load';
+        addLog('深度模型載入失敗，使用原本測距公式');
+      }
+    }
+
+    function getDepthInputSize(frameWidth, frameHeight) {
+      const scale = DEPTH_INPUT_SIZE / Math.max(frameWidth, frameHeight);
+      const width = Math.max(14, Math.round((frameWidth * scale) / 14) * 14);
+      const height = Math.max(14, Math.round((frameHeight * scale) / 14) * 14);
+      return { width, height };
+    }
+
+    // 最新幀優先、絕不排隊：忙碌時直接跳過，讓延遲保持有界
+    async function runDepthInference() {
+      if (depthBusy || !depthSession || !video.videoWidth || !video.videoHeight) return;
+      depthBusy = true;
+      try {
+        const { width, height } = getDepthInputSize(video.videoWidth, video.videoHeight);
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(video, 0, 0, width, height);
+        const pixels = ctx.getImageData(0, 0, width, height).data;
+        let brightnessSum = 0;
+        const input = new Float32Array(3 * width * height);
+        for (let p = 0; p < width * height; p++) {
+          const r = pixels[p * 4];
+          const g = pixels[p * 4 + 1];
+          const b = pixels[p * 4 + 2];
+          brightnessSum += (r + g + b) / 3;
+          input[p] = (r / 255 - DEPTH_MEAN[0]) / DEPTH_STD[0];
+          input[width * height + p] = (g / 255 - DEPTH_MEAN[1]) / DEPTH_STD[1];
+          input[2 * width * height + p] = (b / 255 - DEPTH_MEAN[2]) / DEPTH_STD[2];
+        }
+        const started = performance.now();
+        // 深度推論由 depthBusy 鎖保護（不會重疊），直接 await 讓它跑完；
+        // 跑完若超過 DEPTH_SLOW_MS，下方會自動停用深度輔助
+        const output = await depthSession.run({
+          pixel_values: new ort.Tensor('float32', input, [1, 3, height, width])
+        });
+        depthInferenceMs = performance.now() - started;
+        latestDepthRaw = output.predicted_depth.data;
+        depthInputWidth = width;
+        depthInputHeight = height;
+        latestDepthTime = Date.now();
+        latestDepthBrightness = brightnessSum / (width * height);
+        // 慢機自動停用深度輔助，退回原本公式
+        if (depthInferenceMs > DEPTH_SLOW_MS) {
+          depthDisabled = true;
+          depthDisabledReason = 'slow';
+          depthSession = null;
+          latestDepthRaw = null;
+          addLog(`深度推論太慢（${Math.round(depthInferenceMs)}ms），已停用深度輔助`);
+        }
+      } catch (error) {
+        console.warn('Depth inference failed.', error);
+        depthInferenceMs = 2000;
+      } finally {
+        depthBusy = false;
+      }
+    }
+
+    function maybeRunDepthInference() {
+      if (depthDisabled || !depthSession || depthBusy) return;
+      const interval = Math.max(600, Math.min(2000, depthInferenceMs * 3));
+      if (Date.now() - depthLastRunTime < interval) return;
+      depthLastRunTime = Date.now();
+      void runDepthInference();
+    }
+
+    async function waitForDepthIdle(timeoutMs = 3000) {
+      const start = Date.now();
+      while (depthBusy && Date.now() - start < timeoutMs) {
+        await new Promise(resolve => setTimeout(resolve, 80));
+      }
+    }
+
+    // 框內底部中央 1/3 區域的反深度中位數（值大 = 近）
+    function medianDisparityForBox(prediction, frameWidth, frameHeight) {
+      if (!latestDepthRaw || Date.now() - latestDepthTime > DEPTH_FRESH_MS) return null;
+      const [x, y, width, height] = prediction.bbox;
+      const sx = (x * depthInputWidth) / frameWidth;
+      const sy = (y * depthInputHeight) / frameHeight;
+      const sw = (width * depthInputWidth) / frameWidth;
+      const sh = (height * depthInputHeight) / frameHeight;
+      const x0 = Math.max(0, Math.floor(sx + sw / 3));
+      const x1 = Math.min(depthInputWidth, Math.ceil(sx + (2 * sw) / 3));
+      const y0 = Math.max(0, Math.floor(sy + (2 * sh) / 3));
+      const y1 = Math.min(depthInputHeight, Math.ceil(sy + sh));
+      if (x1 <= x0 || y1 <= y0) return null;
+      const values = [];
+      for (let yy = y0; yy < y1; yy++) {
+        for (let xx = x0; xx < x1; xx++) values.push(latestDepthRaw[yy * depthInputWidth + xx]);
+      }
+      values.sort((a, b) => a - b);
+      const median = values[Math.floor(values.length / 2)];
+      if (!Number.isFinite(median) || median <= 0) return null;
+      return median;
+    }
+
+    // 深度距離（需先完成深度比例校準）
+    function depthDistanceForBox(prediction, frameWidth, frameHeight) {
+      if (!depthScaleFactor || latestDepthBrightness < DEPTH_MIN_BRIGHTNESS) return null;
+      const disparity = medianDisparityForBox(prediction, frameWidth, frameHeight);
+      if (disparity === null) return null;
+      const distance = depthScaleFactor / disparity;
+      if (!Number.isFinite(distance) || distance < 0.15 || distance > 60) return null;
+      return distance;
+    }
+
     async function loadDetectionModel() {
       if (selectedModelMode === 'coco') {
         activeModelName = 'COCO-SSD 後備模型';
@@ -1440,14 +1678,36 @@
         });
         return modelPromise;
       }
+      // 重複使用已載入的 YOLO 模型（停止後再開始不用重新載入）
+      if (yoloModelCache) {
+        activeModelName = yoloModelCache.provider === 'webgpu'
+          ? '專屬 YOLO 320 ONNX 模型（WebGPU）'
+          : '專屬 YOLO 320 ONNX 模型（WASM）';
+        addLog('已重複使用快取的 YOLO 模型');
+        return yoloModelCache.adapter;
+      }
       try {
         const runtimeRoot = new URL('./vendor/onnxruntime/', window.location.href).href;
         ort.env.wasm.wasmPaths = runtimeRoot;
-        const session = await ort.InferenceSession.create(CUSTOM_MODEL_URL, {
-          executionProviders: ['wasm']
-        });
-        activeModelName = '專屬 YOLO 320 ONNX 模型';
-        return createOnnxModelAdapter(session);
+        let session;
+        let yoloProvider = 'wasm';
+        try {
+          session = await ort.InferenceSession.create(CUSTOM_MODEL_URL, {
+            executionProviders: ['webgpu']
+          });
+          yoloProvider = 'webgpu';
+        } catch (webgpuError) {
+          console.warn('YOLO WebGPU unavailable, falling back to WASM.', webgpuError);
+          session = await ort.InferenceSession.create(CUSTOM_MODEL_URL, {
+            executionProviders: ['wasm']
+          });
+        }
+        activeModelName = yoloProvider === 'webgpu'
+          ? '專屬 YOLO 320 ONNX 模型（WebGPU）'
+          : '專屬 YOLO 320 ONNX 模型（WASM）';
+        const adapter = createOnnxModelAdapter(session);
+        yoloModelCache = { adapter, provider: yoloProvider };
+        return adapter;
       } catch (error) {
         console.error('YOLOv11 ONNX model unavailable.', error);
         activeModelName = 'COCO-SSD 後備模型（YOLO 未可用）';
@@ -1513,19 +1773,31 @@
       const inferenceStart = performance.now();
       let predictions = [];
       let inferenceTimedOut = false;
+      let timeoutId = null;
       try {
+        const detectPromise = detectionModel.detect(video);
         predictions = await Promise.race([
-          detectionModel.detect(video),
-          new Promise((resolve) => setTimeout(() => {
-            inferenceTimedOut = true;
-            resolve([]);
-          }, 1800))
+          detectPromise,
+          new Promise((resolve) => {
+            timeoutId = setTimeout(() => {
+              inferenceTimedOut = true;
+              resolve([]);
+            }, 1800);
+          })
         ]);
+        // ★ 關鍵：Promise.race 無法中斷 WASM 底層計算。若發生超時，
+        // 必須等底層推論真正結束後才解開 detecting 鎖，防止慢手機推論無限疊加
+        if (inferenceTimedOut) {
+          await detectPromise.catch(() => {});
+        }
       } catch (error) {
         console.error(error);
       } finally {
+        if (timeoutId) clearTimeout(timeoutId);
         detecting = false;
       }
+      // 舊 session 的結果不應影響新 session 的 UI/日誌
+      if (sessionId !== activeSession || !started) return;
       if (inferenceTimedOut) {
         consecutiveInferenceTimeouts++;
         addLog('AI 推理超時，繼續下一次偵測');
@@ -1533,7 +1805,6 @@
         consecutiveInferenceTimeouts = 0;
       }
       updateAdaptiveFps(performance.now() - inferenceStart);
-      if (sessionId !== activeSession || !started) return;
       lastDetectionActivity = Date.now();
       if (previewEnabled) {
         ctx.clearRect(0, 0, width, height);
@@ -1559,6 +1830,9 @@
         const [, displayWarning] = getCantoneseWarning(threats[0], width);
         const distance = track.distance;
         const highRisk = track.threatLevel === 'emergency';
+        const midRisk = track.threatLevel === 'warning';
+        lastEstimatedDistance = Number.isFinite(distance) ? distance : null;
+        lastDetectedObject = CUSTOM_LABELS[threats[0].class] || threats[0].class;
         recordExperimentData({
           objectName: CUSTOM_LABELS[threats[0].class] || threats[0].class,
           distance: Number.isFinite(distance) ? distance : '',
@@ -1568,12 +1842,18 @@
         });
         distanceValue.textContent = Number.isFinite(distance) ? `${distance.toFixed(1)} m` : '--';
         const riskText = highRisk
-          ? `面積膨脹率 ${(track.areaExpansionRate * 100).toFixed(0)}%/秒`
-          : '靜止或暫未構成碰撞威脅';
-        setRisk(highRisk ? '高風險' : '低風險', riskText);
-        lastAlert.textContent = `${highRisk ? '高風險' : '低風險'}：${displayWarning}（約 ${distance.toFixed(1)} 米）`;
+          ? (track.threatReason === 'distance'
+              ? `障礙物距離過近（${Number.isFinite(distance) ? distance.toFixed(1) : '--'} 米）`
+              : `面積膨脹率 ${(track.areaExpansionRate * 100).toFixed(0)}%/秒`)
+          : midRisk
+            ? `前方 ${Number.isFinite(distance) ? distance.toFixed(1) : '--'} 米內有障礙物`
+            : '靜止或暫未構成碰撞威脅';
+        setRisk(highRisk ? '高風險' : midRisk ? '中風險' : '低風險', riskText);
+        lastAlert.textContent = `${highRisk ? '高風險' : midRisk ? '中風險' : '低風險'}：${displayWarning}${Number.isFinite(distance) ? `（約 ${distance.toFixed(1)} 米）` : ''}`;
         handleAlert(track, previous, displayWarning);
       } else {
+        lastEstimatedDistance = null;
+        lastDetectedObject = '';
         recordExperimentData({ objectName: '無' });
         if (obstacleActive) {
           obstacleActive = false;
@@ -1587,6 +1867,8 @@
       }
 
       if (previewEnabled) visible.forEach(prediction => drawDetection(ctx, prediction));
+
+      maybeRunDepthInference();
 
       scheduleDetection(sessionId);
     }
@@ -1636,6 +1918,7 @@
         ]);
         if (sessionId !== activeSession || !started) return;
         addLog(`${activeModelName}已載入`);
+        void loadDepthModel();
         setRisk('安全', `${activeModelName}已就緒，正在掃描前方`);
         if (navigator.getBattery) {
           navigator.getBattery().then(battery => { window.currentBattery = battery; });
@@ -1646,9 +1929,10 @@
       } catch (err) {
         console.error(err);
         if (sessionId !== activeSession) return;
+        // ★ 釋放已開啟的相機串流，避免鏡頭燈持續亮著、串流被佔用
+        stopCamera();
         addLog('攝影機或 AI 模型啟動失敗');
         setRisk('安全', '請確認鏡頭權限及網絡連線，或改用 Safari 再試一次');
-        started = false;
       }
     }
 
@@ -1685,6 +1969,7 @@
       activeSession++;
       obstacleActive = false;
       lastTriggerTime = 0;
+      window.activeCalibratedClass = null;
       if (animationId) cancelAnimationFrame(animationId);
       if (animationId) clearTimeout(animationId);
       if (watchdogTimer) clearInterval(watchdogTimer);
@@ -1702,9 +1987,15 @@
       video.load();
       prevFrame = null;
       detectionModel = null;
-      detecting = false;
+      // 注意：detecting 與 depthBusy 不在此重置。
+      // 若舊推論仍在背景執行，讓它自己的 finally 解鎖，
+      // 避免「秒停秒開」時新推論撞上仍在跑的舊推論（同一個 session 不可重入）。
       trackedObstacles.clear();
       distanceHistory.clear();
+      lastDistancePulseTime = 0;
+      lastEstimatedDistance = null;
+      lastDetectedObject = '';
+      groundTruthStatus.textContent = '實驗模式：輸入捲尺實測距離後按「標記真值」，會把估算誤差寫進 CSV。';
       previousMotionData = null;
       movementRate = 0;
       if (audioContext && audioContext.state === 'running') audioContext.suspend();
@@ -1754,6 +2045,33 @@
     document.getElementById('startBtn').addEventListener('click', startCamera);
     document.getElementById('stopBtn').addEventListener('click', stopCamera);
     exportBtn.addEventListener('click', exportExperimentData);
+    markGroundTruthBtn.addEventListener('click', () => {
+      const trueDistance = Number(groundTruthInput.value);
+      if (!(trueDistance > 0)) {
+        groundTruthStatus.textContent = '請先輸入捲尺實測的實際距離。';
+        return;
+      }
+      if (lastEstimatedDistance === null) {
+        groundTruthStatus.textContent = '目前沒有偵測中的障礙物，無法標記。';
+        return;
+      }
+      const errorPct = ((lastEstimatedDistance - trueDistance) / trueDistance) * 100;
+      experimentRecords.push({
+        time: new Date().toISOString(),
+        pitch: devicePitchDeg,
+        fps: 1000 / Math.max(1, nextDetectionDelay),
+        object: lastDetectedObject,
+        distance: lastEstimatedDistance,
+        distanceRaw: '',
+        distanceSource: '實驗標記',
+        groundTruth: trueDistance,
+        errorPct,
+        areaExpansionRate: 0
+      });
+      exportBtn.classList.add('ready');
+      groundTruthStatus.textContent = `已記錄：估算 ${lastEstimatedDistance.toFixed(2)}m vs 真值 ${trueDistance.toFixed(2)}m，誤差 ${errorPct >= 0 ? '+' : ''}${errorPct.toFixed(1)}%`;
+      addLog(`誤差標記：${lastEstimatedDistance.toFixed(2)}m vs 真值 ${trueDistance.toFixed(2)}m（${errorPct >= 0 ? '+' : ''}${errorPct.toFixed(1)}%）`);
+    });
     calibrateBtn.addEventListener('click', calibrateCamera);
     cameraPresetSelect.addEventListener('change', () => {
       if (cameraPresetSelect.value !== 'custom') applyCameraPreset(cameraPresetSelect.value);

@@ -1,7 +1,7 @@
 {
   "name": "澳門導盲助手",
   "short_name": "導盲助手",
-  "description": "使用手機鏡頭、TTC 和語音提示協助辨識前方障礙物",
+  "description": "使用手機鏡頭、地面幾何測距、TTC 和語音提示協助辨識前方障礙物",
   "start_url": "./first_part.html",
   "display": "standalone",
   "orientation": "portrait",

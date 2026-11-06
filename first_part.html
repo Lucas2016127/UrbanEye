@@ -765,7 +765,8 @@
 
     function getVerticalFocalLengthPixels(frameWidth, frameHeight) {
       if (!frameWidth || !frameHeight) return frameHeight / (2 * Math.tan((DEFAULT_CAMERA_VERTICAL_FOV_DEG * Math.PI / 180) / 2));
-      return getFocalLengthPixels(frameWidth) * (frameHeight / frameWidth);
+      // 方形像素影像的水平及垂直焦距（以像素計）相同。
+      return getFocalLengthPixels(frameWidth);
     }
 
     function getScenePartition(frameWidth, frameHeight) {
@@ -935,12 +936,16 @@
       URL.revokeObjectURL(url);
     }
 
-    function speak(text) {
+    function speak(text, urgent = false) {
       try {
         if (!('speechSynthesis' in window)) return;
         const now = Date.now();
-        if (now - lastSpeechTime < 2000) return;
-        if (window.speechSynthesis.speaking) return;
+        if (urgent) {
+          window.speechSynthesis.cancel();
+        } else {
+          if (now - lastSpeechTime < 2000) return;
+          if (window.speechSynthesis.speaking) return;
+        }
         lastSpeechTime = now;
         const msg = new SpeechSynthesisUtterance(text);
         msg.lang = speechLanguage;
@@ -1138,7 +1143,7 @@
                 : speechLanguage === 'zh-CN'
                   ? '前方障礙物正在快速接近，請立即停下。'
                   : '前面障礙物正在快速接近，請即刻停低。');
-          speak(`${emergencyText} ${translatedWarning}`);
+          speak(`${emergencyText} ${translatedWarning}`, true);
           playDirectionTone(track.direction, true);
           triggerEmergencyVibration();
           addLog(`緊急警報：${track.threatReason === 'distance' ? '距離過近' : `面積膨脹率 ${(track.areaExpansionRate * 100).toFixed(0)}%/秒`}`);
@@ -1813,28 +1818,37 @@
       }
 
       const visible = predictions.filter(prediction => prediction.score >= 0.58);
-      const threats = visible
-        .filter(prediction => CUSTOM_MODEL_CLASSES.has(prediction.class) || COCO_THREAT_CLASSES.has(prediction.class))
-        .sort((a, b) => {
-          const aPriority = CUSTOM_MODEL_PRIORITY[a.class] || 1;
-          const bPriority = CUSTOM_MODEL_PRIORITY[b.class] || 1;
-          return (b.score * bPriority) - (a.score * aPriority);
-        });
+      const threats = visible.filter(prediction =>
+        CUSTOM_MODEL_CLASSES.has(prediction.class) || COCO_THREAT_CLASSES.has(prediction.class));
 
       if (threats.length > 0) {
         obstacleActive = true;
         detectValue.textContent = '有';
         const now = Date.now();
         cleanTracks(now);
-        const { track, previous } = updateTrack(threats[0], width, now);
-        const [, displayWarning] = getCantoneseWarning(threats[0], width);
+        // 先評估每個障礙物，再依風險、距離及辨識分數選出主要警報。
+        const riskRank = { emergency: 2, warning: 1, ambient: 0 };
+        const assessed = threats.map(prediction => ({
+          prediction, ...updateTrack(prediction, width, now)
+        }));
+        assessed.sort((a, b) => {
+          const riskDifference = riskRank[b.track.threatLevel] - riskRank[a.track.threatLevel];
+          if (riskDifference) return riskDifference;
+          const aDistance = Number.isFinite(a.track.distance) ? a.track.distance : Infinity;
+          const bDistance = Number.isFinite(b.track.distance) ? b.track.distance : Infinity;
+          if (aDistance !== bDistance) return aDistance - bDistance;
+          return b.prediction.score * (CUSTOM_MODEL_PRIORITY[b.prediction.class] || 1)
+            - a.prediction.score * (CUSTOM_MODEL_PRIORITY[a.prediction.class] || 1);
+        });
+        const { prediction, track, previous } = assessed[0];
+        const [, displayWarning] = getCantoneseWarning(prediction, width);
         const distance = track.distance;
         const highRisk = track.threatLevel === 'emergency';
         const midRisk = track.threatLevel === 'warning';
         lastEstimatedDistance = Number.isFinite(distance) ? distance : null;
-        lastDetectedObject = CUSTOM_LABELS[threats[0].class] || threats[0].class;
+        lastDetectedObject = CUSTOM_LABELS[prediction.class] || prediction.class;
         recordExperimentData({
-          objectName: CUSTOM_LABELS[threats[0].class] || threats[0].class,
+          objectName: CUSTOM_LABELS[prediction.class] || prediction.class,
           distance: Number.isFinite(distance) ? distance : '',
           distanceRaw: Number.isFinite(track.rawDistance) ? track.rawDistance : '',
           distanceSource: track.distanceSource || '',
@@ -1883,18 +1897,26 @@
 
       try {
         await startOrientationTracking();
+        if (sessionId !== activeSession || !started) return;
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           throw new Error('Safari 不支援 getUserMedia');
         }
+        let cameraStream;
         try {
-          stream = await navigator.mediaDevices.getUserMedia({
+          cameraStream = await navigator.mediaDevices.getUserMedia({
             video: getVideoConstraints(),
             audio: false
           });
         } catch (constraintError) {
+          if (sessionId !== activeSession || !started) return;
           console.warn('640x480 camera request failed; retrying with device defaults.', constraintError);
-          stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
         }
+        if (sessionId !== activeSession || !started) {
+          cameraStream.getTracks().forEach(track => track.stop());
+          return;
+        }
+        stream = cameraStream;
         video.srcObject = stream;
         video.muted = true;
         video.playsInline = true;
@@ -1903,20 +1925,24 @@
         try {
           await video.play();
         } catch (playError) {
+          if (sessionId !== activeSession || !started) return;
           console.warn('video.play() initial attempt failed on iOS, retrying shortly.', playError);
           await new Promise(resolve => setTimeout(resolve, 300));
+          if (sessionId !== activeSession || !started) return;
           await video.play().catch(() => {});
         }
+        if (sessionId !== activeSession || !started) return;
         previewBtn.disabled = false;
         addLog('攝影機已啟動');
         playStartupTone();
         speak(translateStartup());
         setRisk('安全', '正在載入 AI 模型');
-        detectionModel = await Promise.race([
+        const loadedModel = await Promise.race([
           loadDetectionModel(),
           new Promise((resolve, reject) => setTimeout(() => reject(new Error('AI 模型載入逾時')), 20000))
         ]);
         if (sessionId !== activeSession || !started) return;
+        detectionModel = loadedModel;
         addLog(`${activeModelName}已載入`);
         void loadDepthModel();
         setRisk('安全', `${activeModelName}已就緒，正在掃描前方`);

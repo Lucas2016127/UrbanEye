@@ -398,7 +398,7 @@
             <input id="kimiApiKey" type="password" autocomplete="off" placeholder="輸入 Kimi API key">
             <button id="kimiBtn" type="button">分析當下環境</button>
           </div>
-          <div id="kimiStatus" class="small">輸入 API key 後，可按鈕或快速點擊螢幕四下分析環境。</div>
+          <div id="kimiStatus" class="small">輸入 API key 後，可按鈕或快速點擊螢幕兩下分析環境。</div>
           <div id="kimiResult" class="warning-text">Kimi 尚未分析影像</div>
         </div>
 
@@ -501,6 +501,9 @@
     let modelLoadGeneration = 0;
     let yoloModelCache = null;
     let detecting = false;
+    let calibrationInProgress = false;
+    let calibrationGeneration = 0;
+    let activeInferenceWork = null;
     let activeSession = 0;
     let nextDetectionDelay = 1000 / 10;
     let lastInferenceMs = 0;
@@ -560,7 +563,7 @@
     const DEPTH_MEAN = [0.485, 0.456, 0.406];
     const DEPTH_STD = [0.229, 0.224, 0.225];
     const DEPTH_FRESH_MS = 1500;
-    const DEPTH_SLOW_MS = 450;
+    const DEPTH_SLOW_MS = 600;
     const DEPTH_MIN_BRIGHTNESS = 22;
     let depthSession = null;
     let depthProvider = null;
@@ -574,6 +577,8 @@
     let depthInferenceMs = 0;
     let depthDisabled = false;
     let depthDisabledReason = '';
+    let depthWasmFallbackStarted = false;
+    let depthLoadGeneration = 0;
     let depthScaleFactor = Number(localStorage.getItem('depthScaleFactor')) || 0;
 
     const CUSTOM_MODEL_URL = './models/obstacle-yolo/yolov11best.onnx';
@@ -834,16 +839,27 @@
     }
 
     async function startOrientationTracking() {
-      if (orientationListenerStarted || !('DeviceOrientationEvent' in window)) return;
+      if (orientationListenerStarted) return;
+      if (!('DeviceOrientationEvent' in window)) {
+        pitchValue.textContent = '俯仰角不可用';
+        return;
+      }
       try {
-        if (typeof DeviceOrientationEvent.requestPermission === 'function') {
-          const permission = await DeviceOrientationEvent.requestPermission();
-          if (permission !== 'granted') return;
+        const orientationApi = window.DeviceOrientationEvent;
+        if (typeof orientationApi.requestPermission === 'function') {
+          const permission = await orientationApi.requestPermission();
+          if (permission !== 'granted') {
+            pitchValue.textContent = '俯仰角權限被拒絕';
+            return;
+          }
         }
         window.addEventListener('deviceorientation', updateDevicePitch, true);
+        window.addEventListener('deviceorientationabsolute', updateDevicePitch, true);
         orientationListenerStarted = true;
+        pitchValue.textContent = '等待 iPad 俯仰角...';
       } catch (error) {
         console.warn('Device orientation unavailable.', error);
+        pitchValue.textContent = '俯仰角不可用';
       }
     }
 
@@ -855,10 +871,22 @@
         return;
       }
 
+      const calibrationSessionId = activeSession;
+      const calibrationId = ++calibrationGeneration;
       calibrateBtn.disabled = true;
+      calibrationInProgress = true;
       calibrationStatus.textContent = '正在拍攝並辨識校準物件...';
       try {
+        const idle = await waitForInferenceIdle();
+        if (calibrationId !== calibrationGeneration
+          || calibrationSessionId !== activeSession || !started) return;
+        if (!idle) {
+          calibrationStatus.textContent = '背景辨識仍在執行，請稍後再試。';
+          return;
+        }
         const predictions = await detectionModel.detect(video);
+        if (calibrationId !== calibrationGeneration
+          || calibrationSessionId !== activeSession || !started) return;
         // 放寬限制，允許所有高信心偵測物件進行校準。
         const candidate = predictions
           .filter(prediction => prediction.score >= 0.5)
@@ -890,7 +918,11 @@
         if (!depthDisabled && depthSession) {
           try {
             await waitForDepthIdle();
+            if (calibrationId !== calibrationGeneration
+              || calibrationSessionId !== activeSession || !started) return;
             await runDepthInference();
+            if (calibrationId !== calibrationGeneration
+              || calibrationSessionId !== activeSession || !started) return;
             const disparity = medianDisparityForBox(candidate, video.videoWidth, video.videoHeight);
             if (disparity !== null && disparity > 0) {
               depthScaleFactor = knownDistance * disparity;
@@ -901,13 +933,22 @@
             console.warn('Depth calibration skipped.', error);
           }
         }
+        if (calibrationId !== calibrationGeneration
+          || calibrationSessionId !== activeSession || !started) return;
         calibrationStatus.textContent = `校準完成：視角約 ${calibratedFov.toFixed(1)}°，並已記錄「${CUSTOM_LABELS[candidate.class] || candidate.class}」實際高度 ${knownHeight.toFixed(2)} 米。${depthCalibrated ? ' 深度比例已校準。' : ''}`;
         addLog(`相機校準完成，視角 ${calibratedFov.toFixed(1)}°`);
       } catch (error) {
         console.error(error);
-        calibrationStatus.textContent = '校準失敗，請確認鏡頭仍在運作後重試。';
+        if (calibrationId === calibrationGeneration
+          && calibrationSessionId === activeSession && started) {
+          calibrationStatus.textContent = '校準失敗，請確認鏡頭仍在運作後重試。';
+        }
       } finally {
-        calibrateBtn.disabled = false;
+        if (calibrationId === calibrationGeneration) {
+          calibrationInProgress = false;
+          calibrateBtn.disabled = false;
+          if (started && calibrationSessionId === activeSession) scheduleDetection(activeSession);
+        }
       }
     }
 
@@ -1126,6 +1167,9 @@
       const threatReason = approachingFast ? 'approach' : distanceTier === 'ambient' ? 'ambient' : 'distance';
       const track = {
         key, time: now, matchedAt: now, bbox: prediction.bbox.slice(), centerX, centerY, distance, sceneZone, area, areaExpansionRate, threatLevel, threatReason,
+        emergencyAlerted: threatLevel === 'emergency' && previous?.threatLevel === 'emergency'
+          ? previous.emergencyAlerted
+          : false,
         direction: getDirection(prediction, frameWidth),
         className: prediction.class,
         rawDistance: distanceInfo.distance,
@@ -1151,6 +1195,23 @@
         animationId = null;
         detectObstacle(sessionId);
       }, nextDetectionDelay);
+    }
+
+    async function waitForInferenceIdle(timeoutMs = 5000) {
+      const start = Date.now();
+      while (detecting || activeInferenceWork) {
+        if (Date.now() - start >= timeoutMs) return false;
+        const work = activeInferenceWork;
+        if (work) {
+          await Promise.race([
+            work.catch(() => {}),
+            new Promise(resolve => setTimeout(resolve, 50))
+          ]);
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+      }
+      return true;
     }
 
     function startWatchdog(sessionId) {
@@ -1186,10 +1247,11 @@
     function handleAlert(track, previous, displayWarning) {
       try {
         const becameEmergency = track.threatLevel === 'emergency'
-          && (!previous || previous.threatLevel !== 'emergency');
+          && (!previous || previous.threatLevel !== 'emergency' || !track.emergencyAlerted);
         const becameWarning = track.threatLevel === 'warning'
           && (!previous || previous.threatLevel === 'ambient');
         if (becameEmergency) {
+          track.emergencyAlerted = true;
           const translatedWarning = translateWarning(displayWarning);
           const emergencyText = track.threatReason === 'distance'
             ? (speechLanguage === 'en-US'
@@ -1547,7 +1609,7 @@
       return keptPredictions.sort((a, b) => b.score - a.score);
     }
 
-    function createOnnxModelAdapter(session) {
+    function createOnnxModelAdapter(session, provider = 'wasm') {
       const inputName = session.inputNames[0];
       const outputName = session.outputNames[0];
       const inputSize = MODEL_INPUT_SIZE;
@@ -1557,6 +1619,7 @@
       const inputContext = inputCanvas.getContext('2d', { willReadFrequently: true });
 
       return {
+        provider,
         async detect(source) {
           const width = source.videoWidth || source.width;
           const height = source.videoHeight || source.height;
@@ -1603,12 +1666,15 @@
     }
 
     // ── Depth Anything 深度模型 ──
-    async function loadDepthModel() {
-      if (depthDisabled || depthSession) return;
+    async function loadDepthModel(forceWasm = false) {
+      if (depthDisabled || depthSession || depthWasmFallbackStarted) return;
+      const loadGeneration = ++depthLoadGeneration;
+      if (forceWasm) depthWasmFallbackStarted = true;
       const runtimeRoot = new URL('./vendor/onnxruntime/', window.location.href).href;
       ort.env.wasm.wasmPaths = runtimeRoot;
       try {
         try {
+          if (forceWasm) throw new Error('WebGPU disabled after slow depth inference');
           depthSession = await ort.InferenceSession.create(DEPTH_MODEL_URL, { executionProviders: ['webgpu'] });
           depthProvider = 'webgpu';
         } catch (webgpuError) {
@@ -1616,12 +1682,19 @@
           depthSession = await ort.InferenceSession.create(DEPTH_MODEL_URL, { executionProviders: ['wasm'] });
           depthProvider = 'wasm';
         }
+        if (loadGeneration !== depthLoadGeneration) return;
+        depthWasmFallbackStarted = false;
         addLog(`深度模型已載入（${depthProvider.toUpperCase()}），輔助測距啟用`);
       } catch (error) {
         console.error('Depth model unavailable.', error);
-        depthDisabled = true;
-        depthDisabledReason = 'load';
-        addLog('深度模型載入失敗，使用原本測距公式');
+        if (loadGeneration === depthLoadGeneration) {
+          depthWasmFallbackStarted = false;
+          depthDisabled = true;
+          depthDisabledReason = 'load';
+        }
+        if (loadGeneration === depthLoadGeneration) {
+          addLog('深度模型載入失敗，使用原本測距公式');
+        }
       }
     }
 
@@ -1656,9 +1729,9 @@
           input[2 * width * height + p] = (b / 255 - DEPTH_MEAN[2]) / DEPTH_STD[2];
         }
         const started = performance.now();
-        // 深度推論由 depthBusy 鎖保護（不會重疊），直接 await 讓它跑完；
-        // 跑完若超過 DEPTH_SLOW_MS，下方會自動停用深度輔助
-        const output = await depthSession.run({
+        const inferenceSession = depthSession;
+        const inferenceProvider = depthProvider;
+        const output = await inferenceSession.run({
           pixel_values: new ort.Tensor('float32', input, [1, 3, height, width])
         });
         depthInferenceMs = performance.now() - started;
@@ -1667,13 +1740,20 @@
         depthInputHeight = height;
         latestDepthTime = Date.now();
         latestDepthBrightness = brightnessSum / (width * height);
-        // 慢機自動停用深度輔助，退回原本公式
-        if (depthInferenceMs > DEPTH_SLOW_MS) {
+        if (inferenceProvider === 'webgpu' && depthInferenceMs > DEPTH_SLOW_MS) {
+          depthSession = null;
+          latestDepthRaw = null;
+          latestDepthTime = 0;
+          depthLoadGeneration++;
+          depthWasmFallbackStarted = false;
+          addLog(`WebGPU 深度推論超過 ${DEPTH_SLOW_MS}ms，切換至 WASM`);
+          void loadDepthModel(true);
+        } else if (inferenceProvider === 'wasm' && depthInferenceMs > DEPTH_SLOW_MS) {
           depthDisabled = true;
           depthDisabledReason = 'slow';
           depthSession = null;
           latestDepthRaw = null;
-          addLog(`深度推論太慢（${Math.round(depthInferenceMs)}ms），已停用深度輔助`);
+          addLog(`WASM 深度推論太慢（${Math.round(depthInferenceMs)}ms），已停用深度輔助`);
         }
       } catch (error) {
         console.warn('Depth inference failed.', error);
@@ -1777,6 +1857,7 @@
         let session;
         let yoloProvider = 'wasm';
         try {
+          if (context?.forceWasm) throw new Error('WebGPU disabled for this recovery');
           session = await ort.InferenceSession.create(CUSTOM_MODEL_URL, {
             executionProviders: ['webgpu']
           });
@@ -1787,7 +1868,7 @@
             executionProviders: ['wasm']
           });
         }
-        const adapter = createOnnxModelAdapter(session);
+        const adapter = createOnnxModelAdapter(session, yoloProvider);
         if (isCurrentModelLoad(context) && loadGeneration === modelLoadGeneration) {
           activeModelName = yoloProvider === 'webgpu'
             ? '專屬 YOLO 320 ONNX 模型（WebGPU）'
@@ -1797,6 +1878,7 @@
         return adapter;
       } catch (error) {
         console.error('YOLOv11 ONNX model unavailable.', error);
+        if (context?.forceWasm) throw error;
         if (isCurrentModelLoad(context)) activeModelName = 'COCO-SSD 後備模型（YOLO 未可用）';
         if (!modelPromise) loadCocoModel();
         return modelPromise;
@@ -1839,6 +1921,7 @@
 
     async function detectObstacle(sessionId) {
       if (sessionId !== activeSession || !started) return;
+      if (calibrationInProgress) return;
       lastDetectionActivity = Date.now();
       const ctx = overlay.getContext('2d');
       const width = video.videoWidth;
@@ -1865,14 +1948,19 @@
       let timeoutId = null;
       try {
         const inferenceModel = detectionModel;
+        const inferenceTimeoutMs = inferenceModel.provider === 'webgpu' ? 600 : 1800;
         const detectPromise = inferenceModel.detect(video);
+        activeInferenceWork = detectPromise;
+        void detectPromise.then(() => {}, () => {}).then(() => {
+          if (activeInferenceWork === detectPromise) activeInferenceWork = null;
+        });
         predictions = await Promise.race([
           detectPromise,
           new Promise((resolve) => {
             timeoutId = setTimeout(() => {
               inferenceTimedOut = true;
               resolve([]);
-            }, 1800);
+            }, inferenceTimeoutMs);
           })
         ]);
         if (inferenceTimedOut && sessionId === activeSession && started && detectionModel === inferenceModel) {
@@ -1881,9 +1969,12 @@
           modelLoadGeneration++;
           modelLoadWork = null;
           yoloModelCache = null;
+          const wasWebGpu = inferenceModel.provider === 'webgpu';
           modelRecoveryGeneration++;
           modelRecoveryDisabled = false;
-          addLog('AI 推理超時，準備重建模型工作環境');
+          addLog(wasWebGpu
+            ? 'WebGPU 推理超過 600ms，切換至 WASM'
+            : 'AI 推理超時，準備重建模型工作環境');
           setDetectionFailure('AI 推理超時');
           consecutiveTimeoutRecoveries++;
           if (consecutiveTimeoutRecoveries >= MAX_CONSECUTIVE_TIMEOUT_RECOVERIES) {
@@ -1891,7 +1982,7 @@
             setDetectionFailure('AI 連續推論超時，請重新啟動偵測');
             addLog('AI 連續推論超時，已停止自動重建，請停止後重新啟動');
           } else {
-            void recoverDetectionModel(sessionId, modelRecoveryGeneration, detectPromise);
+            void recoverDetectionModel(sessionId, modelRecoveryGeneration, detectPromise, wasWebGpu);
           }
         }
       } catch (error) {
@@ -2015,7 +2106,7 @@
       recordExperimentData({ objectName: '辨識失敗', distanceSource: reason });
     }
 
-    async function recoverDetectionModel(sessionId, recoveryGeneration, staleInference = null) {
+    async function recoverDetectionModel(sessionId, recoveryGeneration, staleInference = null, forceWasm = false) {
       let recoveryWork = null;
       try {
         if (staleInference) void staleInference.catch(() => {});
@@ -2029,7 +2120,8 @@
         recoveryWork = {
           sessionId,
           recoveryGeneration,
-          loadGeneration: modelLoadGeneration
+          loadGeneration: modelLoadGeneration,
+          forceWasm
         };
         const recoveryLoadPromise = loadDetectionModel(recoveryWork);
         const recoveredModel = await Promise.race([
@@ -2060,7 +2152,7 @@
         if (modelRecoveryAttempts < MAX_MODEL_RECOVERY_ATTEMPTS) {
           setDetectionFailure(`AI 模型恢復失敗，重試 ${modelRecoveryAttempts}/${MAX_MODEL_RECOVERY_ATTEMPTS}`);
           window.setTimeout(() => {
-            void recoverDetectionModel(sessionId, recoveryGeneration);
+            void recoverDetectionModel(sessionId, recoveryGeneration, null, forceWasm);
           }, 500);
         } else {
           modelRecoveryDisabled = true;
@@ -2152,7 +2244,7 @@
         // ★ 釋放已開啟的相機串流，避免鏡頭燈持續亮著、串流被佔用
         stopCamera();
         addLog('攝影機或 AI 模型啟動失敗');
-        setRisk('安全', '請確認鏡頭權限及網絡連線，或改用 Safari 再試一次');
+        setDetectionFailure('攝影機或 AI 模型啟動失敗，請確認鏡頭權限及網絡連線，或改用 Safari 再試一次');
       }
     }
 
@@ -2187,6 +2279,8 @@
     function stopCamera() {
       started = false;
       activeSession++;
+      calibrationGeneration++;
+      calibrationInProgress = false;
       modelLoadGeneration++;
       modelLoadWork = null;
       modelPromise = null;
@@ -2243,7 +2337,7 @@
       modelRecoveryAttempts = 0;
       modelRecoveryDisabled = false;
       consecutiveTimeoutRecoveries = 0;
-      kimiStatus.textContent = '輸入 API key 後，可按鈕或快速點擊螢幕四下分析環境。';
+      kimiStatus.textContent = '輸入 API key 後，可按鈕或快速點擊螢幕兩下分析環境。';
     }
 
     previewBtn.addEventListener('click', () => {
@@ -2268,16 +2362,18 @@
       tapSequenceCount = 0;
       tapSequenceTimer = null;
       if (tapCount === 2) {
+        void askKimiForScene();
+        return;
+      }
+      if (tapCount === 3) {
         if (started) stopCamera();
         else void startCamera();
         return;
       }
-      if (tapCount === 3) {
+      if (tapCount === 4) {
         modelModeSelect.value = selectedModelMode === 'yolo' ? 'coco' : 'yolo';
         modelModeSelect.dispatchEvent(new Event('change'));
-        return;
       }
-      if (tapCount === 4) void askKimiForScene();
     }
 
     document.addEventListener('touchstart', event => {
@@ -2298,6 +2394,7 @@
     document.addEventListener('touchend', event => {
       if (!event.target.closest('.camera-box') || tapMoved) return;
       event.preventDefault();
+      void startOrientationTracking();
       tapSequenceCount += 1;
       if (tapSequenceCount > 4) tapSequenceCount = 1;
       if (tapSequenceTimer !== null) window.clearTimeout(tapSequenceTimer);
@@ -2347,7 +2444,7 @@
     const offlineVersion = document.getElementById('offlineVersion');
     const offlineRetryBtn = document.getElementById('offlineRetryBtn');
 
-    function updateOfflineStatus(status, version = 'v19') {
+    function updateOfflineStatus(status, version = 'v21') {
       offlineStatus.className = `offline-status ${status}`;
       offlineVersion.textContent = `版本：${version}`;
       offlineRetryBtn.hidden = status !== 'failed';
@@ -2377,7 +2474,7 @@
     if ('serviceWorker' in navigator && window.isSecureContext) {
       navigator.serviceWorker.addEventListener('message', event => {
         if (event.data?.type === 'offline-status'
-          && event.data.version === 'v19'
+          && event.data.version === 'v21'
           && (event.data.status !== 'ready'
             || (navigator.serviceWorker.controller && event.source === navigator.serviceWorker.controller))) {
           updateOfflineStatus(event.data.status, event.data.version);
@@ -2385,7 +2482,7 @@
       });
       navigator.serviceWorker.register('./sw.js')
         .then(registration => {
-          offlineVersion.textContent = `版本：${registration.active?.scriptURL ? 'v19' : '下載中'}`;
+          offlineVersion.textContent = `版本：${registration.active?.scriptURL ? 'v21' : '下載中'}`;
           if (registration.active && navigator.serviceWorker.controller) {
             registration.active.postMessage({ type: 'offline-status' });
           }

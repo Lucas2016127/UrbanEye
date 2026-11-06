@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'urbaneye-cache-';
-const CACHE_VERSION = 'v19';
+const CACHE_VERSION = 'v21';
 const CACHE_NAME = `${CACHE_PREFIX}${CACHE_VERSION}`;
 const LEGACY_CACHE_NAMES = ['macau-guide-v17'];
 const APP_SHELL = [

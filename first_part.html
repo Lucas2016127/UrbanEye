@@ -263,6 +263,20 @@
       line-height: 1.5;
     }
 
+    .offline-status {
+      display: grid;
+      gap: 8px;
+      margin: 0 20px 16px;
+      padding: 10px 14px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.8);
+    }
+
+    .offline-status.ready { border-color: rgba(34, 197, 94, 0.55); }
+    .offline-status.failed { border-color: rgba(239, 68, 68, 0.65); }
+    .offline-status button { justify-self: start; padding: 7px 12px; }
+
     .kimi-panel {
       display: grid;
       gap: 10px;
@@ -330,6 +344,11 @@
         <button id="startBtn">開始偵測</button>
         <button id="stopBtn">停止</button>
       </div>
+    </div>
+    <div id="offlineStatus" class="offline-status" role="status" aria-live="polite">
+      <div id="offlineStatusText">正在準備離線資源，請保持連線</div>
+      <div id="offlineVersion" class="small">版本：檢查中</div>
+      <button id="offlineRetryBtn" type="button" hidden>重試離線下載</button>
     </div>
 
     <div class="content">
@@ -478,6 +497,8 @@
     let lastTriggerTime = 0;
     let detectionModel = null;
     let modelPromise = null;
+    let modelLoadWork = null;
+    let modelLoadGeneration = 0;
     let yoloModelCache = null;
     let detecting = false;
     let activeSession = 0;
@@ -1716,26 +1737,40 @@
         modelUrl: './vendor/tensorflow/coco-ssd/model.json'
       });
       modelPromise = currentPromise;
+      modelLoadWork = { promise: currentPromise, generation: modelLoadGeneration };
       currentPromise.catch(() => {
         if (modelPromise === currentPromise) modelPromise = null;
+        if (modelLoadWork && modelLoadWork.promise === currentPromise) modelLoadWork = null;
       });
       return currentPromise;
     }
 
-    async function loadDetectionModel() {
+    function isCurrentModelLoad(context) {
+      return !context || (
+        context.sessionId === activeSession
+        && started
+        && context.recoveryGeneration === modelRecoveryGeneration
+        && context.loadGeneration === modelLoadGeneration
+      );
+    }
+
+    async function loadDetectionModel(context = null) {
       if (selectedModelMode === 'coco') {
-        activeModelName = 'COCO-SSD 後備模型';
+        if (isCurrentModelLoad(context)) activeModelName = 'COCO-SSD 後備模型';
         if (!modelPromise) loadCocoModel();
         return modelPromise;
       }
       // 重複使用已載入的 YOLO 模型（停止後再開始不用重新載入）
       if (yoloModelCache) {
-        activeModelName = yoloModelCache.provider === 'webgpu'
-          ? '專屬 YOLO 320 ONNX 模型（WebGPU）'
-          : '專屬 YOLO 320 ONNX 模型（WASM）';
-        addLog('已重複使用快取的 YOLO 模型');
+        if (isCurrentModelLoad(context)) {
+          activeModelName = yoloModelCache.provider === 'webgpu'
+            ? '專屬 YOLO 320 ONNX 模型（WebGPU）'
+            : '專屬 YOLO 320 ONNX 模型（WASM）';
+          addLog('已重複使用快取的 YOLO 模型');
+        }
         return yoloModelCache.adapter;
       }
+      const loadGeneration = modelLoadGeneration;
       try {
         const runtimeRoot = new URL('./vendor/onnxruntime/', window.location.href).href;
         ort.env.wasm.wasmPaths = runtimeRoot;
@@ -1752,15 +1787,17 @@
             executionProviders: ['wasm']
           });
         }
-        activeModelName = yoloProvider === 'webgpu'
-          ? '專屬 YOLO 320 ONNX 模型（WebGPU）'
-          : '專屬 YOLO 320 ONNX 模型（WASM）';
         const adapter = createOnnxModelAdapter(session);
-        yoloModelCache = { adapter, provider: yoloProvider };
+        if (isCurrentModelLoad(context) && loadGeneration === modelLoadGeneration) {
+          activeModelName = yoloProvider === 'webgpu'
+            ? '專屬 YOLO 320 ONNX 模型（WebGPU）'
+            : '專屬 YOLO 320 ONNX 模型（WASM）';
+          yoloModelCache = { adapter, provider: yoloProvider };
+        }
         return adapter;
       } catch (error) {
         console.error('YOLOv11 ONNX model unavailable.', error);
-        activeModelName = 'COCO-SSD 後備模型（YOLO 未可用）';
+        if (isCurrentModelLoad(context)) activeModelName = 'COCO-SSD 後備模型（YOLO 未可用）';
         if (!modelPromise) loadCocoModel();
         return modelPromise;
       }
@@ -1841,6 +1878,8 @@
         if (inferenceTimedOut && sessionId === activeSession && started && detectionModel === inferenceModel) {
           detectionModel = null;
           modelPromise = null;
+          modelLoadGeneration++;
+          modelLoadWork = null;
           yoloModelCache = null;
           modelRecoveryGeneration++;
           modelRecoveryDisabled = false;
@@ -1977,14 +2016,22 @@
     }
 
     async function recoverDetectionModel(sessionId, recoveryGeneration, staleInference = null) {
-      let recoveryLoadPromise = null;
+      let recoveryWork = null;
       try {
         if (staleInference) void staleInference.catch(() => {});
         if (sessionId !== activeSession || !started || recoveryGeneration !== modelRecoveryGeneration
           || modelRecoveryInProgress || modelRecoveryDisabled) return;
         modelRecoveryInProgress = true;
         modelRecoveryAttempts++;
-        recoveryLoadPromise = loadDetectionModel();
+        modelLoadGeneration++;
+        modelPromise = null;
+        modelLoadWork = null;
+        recoveryWork = {
+          sessionId,
+          recoveryGeneration,
+          loadGeneration: modelLoadGeneration
+        };
+        const recoveryLoadPromise = loadDetectionModel(recoveryWork);
         const recoveredModel = await Promise.race([
           recoveryLoadPromise,
           new Promise((resolve, reject) => {
@@ -2001,8 +2048,13 @@
         }
       } catch (error) {
         console.error('AI model recovery failed.', error);
-        if (modelPromise === recoveryLoadPromise) {
+        if (recoveryWork && recoveryWork.sessionId === activeSession
+          && recoveryWork.recoveryGeneration === modelRecoveryGeneration) {
+          modelLoadGeneration++;
+        }
+        if (modelLoadWork && modelLoadWork.generation === recoveryWork?.loadGeneration) {
           modelPromise = null;
+          modelLoadWork = null;
         }
         if (sessionId !== activeSession || !started || recoveryGeneration !== modelRecoveryGeneration) return;
         if (modelRecoveryAttempts < MAX_MODEL_RECOVERY_ATTEMPTS) {
@@ -2026,6 +2078,7 @@
       warmMobileAudio();
       started = true;
       const sessionId = ++activeSession;
+      modelLoadGeneration++;
       modelRecoveryGeneration++;
       modelRecoveryAttempts = 0;
       modelRecoveryDisabled = false;
@@ -2075,7 +2128,11 @@
         speak(translateStartup());
         setRisk('安全', '正在載入 AI 模型');
         const loadedModel = await Promise.race([
-          loadDetectionModel(),
+          loadDetectionModel({
+            sessionId,
+            recoveryGeneration: modelRecoveryGeneration,
+            loadGeneration: modelLoadGeneration
+          }),
           new Promise((resolve, reject) => setTimeout(() => reject(new Error('AI 模型載入逾時')), 20000))
         ]);
         if (sessionId !== activeSession || !started) return;
@@ -2130,6 +2187,9 @@
     function stopCamera() {
       started = false;
       activeSession++;
+      modelLoadGeneration++;
+      modelLoadWork = null;
+      modelPromise = null;
       modelRecoveryGeneration++;
       obstacleActive = false;
       lastTriggerTime = 0;
@@ -2282,10 +2342,60 @@
     });
     loadCalibration();
 
-    if ('serviceWorker' in navigator && window.isSecureContext) {
-      navigator.serviceWorker.register('./sw.js').catch(error => {
-        console.warn('PWA service worker unavailable.', error);
+    const offlineStatus = document.getElementById('offlineStatus');
+    const offlineStatusText = document.getElementById('offlineStatusText');
+    const offlineVersion = document.getElementById('offlineVersion');
+    const offlineRetryBtn = document.getElementById('offlineRetryBtn');
+
+    function updateOfflineStatus(status, version = 'v19') {
+      offlineStatus.className = `offline-status ${status}`;
+      offlineVersion.textContent = `版本：${version}`;
+      offlineRetryBtn.hidden = status !== 'failed';
+      if (status === 'downloading') {
+        offlineStatusText.textContent = '正在下載離線資源，請保持連線';
+      } else if (status === 'ready') {
+        offlineStatusText.textContent = '離線資源已完整保存，可以斷網';
+      } else {
+        offlineStatusText.textContent = '下載失敗，尚未能離線使用';
+      }
+    }
+
+    offlineRetryBtn.addEventListener('click', () => {
+      updateOfflineStatus('downloading');
+      if (navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'repair-offline' });
+      }
+      navigator.serviceWorker.getRegistration('./sw.js').then(registration => {
+        if (registration) return registration.update();
+        return navigator.serviceWorker.register('./sw.js');
+      }).catch(error => {
+        console.warn('Offline resource retry failed.', error);
+        updateOfflineStatus('failed');
       });
+    });
+
+    if ('serviceWorker' in navigator && window.isSecureContext) {
+      navigator.serviceWorker.addEventListener('message', event => {
+        if (event.data?.type === 'offline-status'
+          && event.data.version === 'v19'
+          && (event.data.status !== 'ready'
+            || (navigator.serviceWorker.controller && event.source === navigator.serviceWorker.controller))) {
+          updateOfflineStatus(event.data.status, event.data.version);
+        }
+      });
+      navigator.serviceWorker.register('./sw.js')
+        .then(registration => {
+          offlineVersion.textContent = `版本：${registration.active?.scriptURL ? 'v19' : '下載中'}`;
+          if (registration.active && navigator.serviceWorker.controller) {
+            registration.active.postMessage({ type: 'offline-status' });
+          }
+        })
+        .catch(error => {
+          console.warn('PWA service worker unavailable.', error);
+          updateOfflineStatus('failed');
+        });
+    } else {
+      updateOfflineStatus('failed', '不支援');
     }
   </script>
 </body>

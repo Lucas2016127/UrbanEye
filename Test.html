@@ -493,6 +493,17 @@
     let watchdogTimer = null;
     let lastDetectionActivity = 0;
     let consecutiveInferenceTimeouts = 0;
+    let lastDetectionCompletedAt = 0;
+    let measuredDetectionFps = 0;
+    let trackSequence = 0;
+    let modelRecoveryInProgress = false;
+    let modelRecoveryAttempts = 0;
+    let modelRecoveryDisabled = false;
+    let modelRecoveryGeneration = 0;
+    let consecutiveTimeoutRecoveries = 0;
+    const MAX_MODEL_RECOVERY_ATTEMPTS = 3;
+    const MAX_CONSECUTIVE_TIMEOUT_RECOVERIES = 3;
+    const MODEL_LOAD_TIMEOUT_MS = 20000;
     const trackedObstacles = new Map();
     const AREA_EXPANSION_EMERGENCY_RATE = 0.45;
     const TRACK_TIMEOUT_MS = 1500;
@@ -501,6 +512,7 @@
     let kimiBusy = false;
     let kimiLastRequest = 0;
     const KIMI_COOLDOWN_MS = 2000;
+    const KIMI_PROXY_URL = `${window.location.protocol}//${window.location.hostname}:8787/api/kimi`;
     const experimentRecords = [];
     let cameraHeightMeters = Number(localStorage.getItem('cameraHeightMeters')) || 1.3;
     cameraHeightInput.value = cameraHeightMeters;
@@ -648,7 +660,7 @@
       kimiStatus.textContent = 'Kimi 正在分析當下環境...';
       speak('正在分析環境。');
       try {
-        const response = await fetch('http://localhost:8787/api/kimi', {
+        const response = await fetch(KIMI_PROXY_URL, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -666,7 +678,7 @@
       } catch (error) {
         kimiStatus.textContent = 'Kimi 連線失敗';
         kimiResult.textContent = error.message.includes('fetch')
-          ? '請先啟動 kimi_proxy_server.js（localhost:8787）。'
+          ? `請先啟動 kimi_proxy_server.js（${window.location.hostname}:8787）。`
           : error.message;
       } finally {
         kimiBusy = false;
@@ -891,7 +903,7 @@
       experimentRecords.push({
         time: new Date().toISOString(),
         pitch: devicePitchDeg,
-        fps: 1000 / Math.max(1, nextDetectionDelay),
+        fps: measuredDetectionFps,
         object: objectName,
         distance,
         distanceRaw,
@@ -1024,9 +1036,35 @@
       }
     }
 
-    function objectTrackKey(prediction, frameWidth) {
-      const [x, , width] = prediction.bbox;
-      return `${prediction.class}:${Math.round(((x + width / 2) / frameWidth) * 10)}`;
+    function boundingBoxIoU(firstBox, secondBox) {
+      const [firstX, firstY, firstWidth, firstHeight] = firstBox;
+      const [secondX, secondY, secondWidth, secondHeight] = secondBox;
+      const intersectionWidth = Math.max(0, Math.min(firstX + firstWidth, secondX + secondWidth) - Math.max(firstX, secondX));
+      const intersectionHeight = Math.max(0, Math.min(firstY + firstHeight, secondY + secondHeight) - Math.max(firstY, secondY));
+      const intersection = intersectionWidth * intersectionHeight;
+      const union = firstWidth * firstHeight + secondWidth * secondHeight - intersection;
+      return union > 0 ? intersection / union : 0;
+    }
+
+    function findMatchingTrack(prediction, frameWidth, now) {
+      const [x, y, width, height] = prediction.bbox;
+      const centerX = x + width / 2;
+      const centerY = y + height / 2;
+      let bestMatch = null;
+      let bestScore = -Infinity;
+      for (const track of trackedObstacles.values()) {
+        if (track.className !== prediction.class || track.matchedAt === now) continue;
+        if (now - track.time > TRACK_TIMEOUT_MS) continue;
+        const iou = boundingBoxIoU(prediction.bbox, track.bbox);
+        const centerDistance = Math.hypot(centerX - track.centerX, centerY - track.centerY) / Math.max(frameWidth, video.videoHeight);
+        if (iou < 0.08 && centerDistance > 0.12) continue;
+        const score = iou - centerDistance * 0.35;
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = track;
+        }
+      }
+      return bestMatch;
     }
 
     function getDirection(prediction, frameWidth) {
@@ -1038,15 +1076,15 @@
     }
 
     function updateTrack(prediction, frameWidth, now) {
-      const key = objectTrackKey(prediction, frameWidth);
       const [x, y, width, height] = prediction.bbox;
       const centerX = x + width / 2;
       const centerY = y + height / 2;
+      const previous = findMatchingTrack(prediction, frameWidth, now);
+      const key = previous ? previous.key : `track-${++trackSequence}`;
       const sceneZone = getSceneZone(prediction, frameWidth, video.videoHeight);
       const distanceInfo = estimateDistanceInfo(prediction, frameWidth, video.videoHeight);
       const distance = smoothDistance(key, distanceInfo.distance);
       const area = Math.max(1, width * height);
-      const previous = trackedObstacles.get(key);
       const elapsedSeconds = previous ? Math.max(0.05, (now - previous.time) / 1000) : null;
       const areaExpansionRate = previous && previous.area > 0
         ? (area - previous.area) / previous.area / elapsedSeconds
@@ -1061,7 +1099,7 @@
       const threatLevel = approachingFast ? 'emergency' : distanceTier;
       const threatReason = approachingFast ? 'approach' : distanceTier === 'ambient' ? 'ambient' : 'distance';
       const track = {
-        key, time: now, centerX, centerY, distance, sceneZone, area, areaExpansionRate, threatLevel, threatReason,
+        key, time: now, matchedAt: now, bbox: prediction.bbox.slice(), centerX, centerY, distance, sceneZone, area, areaExpansionRate, threatLevel, threatReason,
         direction: getDirection(prediction, frameWidth),
         className: prediction.class,
         rawDistance: distanceInfo.distance,
@@ -1094,7 +1132,7 @@
       watchdogTimer = setInterval(() => {
         if (sessionId !== activeSession || !started) return;
         const stale = !detecting && Date.now() - lastDetectionActivity > 6000;
-        if (stale && !animationId) {
+        if (stale && !animationId && !(modelRecoveryDisabled && !detectionModel)) {
           detecting = false;
           consecutiveInferenceTimeouts = 0;
           lastDetectionActivity = Date.now();
@@ -1214,13 +1252,11 @@
       return count ? diff / count : 0;
     }
 
-    function drawDetection(ctx, prediction) {
+    function drawDetection(ctx, prediction, cachedTrack = null) {
       const [x, y, width, height] = prediction.bbox;
       const isThreat = CUSTOM_MODEL_CLASSES.has(prediction.class);
       // 優先使用追蹤器裡「已平滑」的距離，讓預覽數字與右側面板一致；
       // 沒有追蹤記錄時才用即時估算值
-      const trackKey = objectTrackKey(prediction, ctx.canvas.width);
-      const cachedTrack = trackedObstacles.get(trackKey);
       let distanceInfo;
       if (cachedTrack && Date.now() - cachedTrack.time <= TRACK_TIMEOUT_MS) {
         distanceInfo = { distance: cachedTrack.distance, source: cachedTrack.distanceSource };
@@ -1402,7 +1438,7 @@
       const inferenceDelay = inferenceMs * 1.2;
       nextDetectionDelay = Math.max(targetDelay, inferenceDelay);
       const reason = inferenceDelay > targetDelay ? '推論負載' : '固定 30 FPS';
-      fpsValue.textContent = `${(1000 / nextDetectionDelay).toFixed(1)} FPS（${reason}）`;
+      fpsValue.textContent = `${measuredDetectionFps > 0 ? measuredDetectionFps.toFixed(1) : '--'} FPS（${reason}）`;
     }
 
     function getCantoneseWarning(prediction, videoWidth) {
@@ -1664,13 +1700,22 @@
       return distance;
     }
 
+    function loadCocoModel() {
+      const currentPromise = cocoSsd.load({
+        base: 'mobilenet_v2',
+        modelUrl: './vendor/tensorflow/coco-ssd/model.json'
+      });
+      modelPromise = currentPromise;
+      currentPromise.catch(() => {
+        if (modelPromise === currentPromise) modelPromise = null;
+      });
+      return currentPromise;
+    }
+
     async function loadDetectionModel() {
       if (selectedModelMode === 'coco') {
         activeModelName = 'COCO-SSD 後備模型';
-        if (!modelPromise) modelPromise = cocoSsd.load({
-          base: 'mobilenet_v2',
-          modelUrl: './vendor/tensorflow/coco-ssd/model.json'
-        });
+        if (!modelPromise) loadCocoModel();
         return modelPromise;
       }
       // 重複使用已載入的 YOLO 模型（停止後再開始不用重新載入）
@@ -1706,10 +1751,7 @@
       } catch (error) {
         console.error('YOLOv11 ONNX model unavailable.', error);
         activeModelName = 'COCO-SSD 後備模型（YOLO 未可用）';
-        if (!modelPromise) modelPromise = cocoSsd.load({
-          base: 'mobilenet_v2',
-          modelUrl: './vendor/tensorflow/coco-ssd/model.json'
-        });
+        if (!modelPromise) loadCocoModel();
         return modelPromise;
       }
     }
@@ -1754,8 +1796,12 @@
       const ctx = overlay.getContext('2d');
       const width = video.videoWidth;
       const height = video.videoHeight;
-      if (!width || !height || !detectionModel || detecting) {
+      if (!width || !height || detecting) {
         scheduleDetection(sessionId);
+        return;
+      }
+      if (!detectionModel) {
+        if (!modelRecoveryDisabled) scheduleDetection(sessionId);
         return;
       }
 
@@ -1768,9 +1814,11 @@
       const inferenceStart = performance.now();
       let predictions = [];
       let inferenceTimedOut = false;
+      let inferenceFailed = false;
       let timeoutId = null;
       try {
-        const detectPromise = detectionModel.detect(video);
+        const inferenceModel = detectionModel;
+        const detectPromise = inferenceModel.detect(video);
         predictions = await Promise.race([
           detectPromise,
           new Promise((resolve) => {
@@ -1780,13 +1828,27 @@
             }, 1800);
           })
         ]);
-        // ★ 關鍵：Promise.race 無法中斷 WASM 底層計算。若發生超時，
-        // 必須等底層推論真正結束後才解開 detecting 鎖，防止慢手機推論無限疊加
-        if (inferenceTimedOut) {
-          await detectPromise.catch(() => {});
+        if (inferenceTimedOut && sessionId === activeSession && started && detectionModel === inferenceModel) {
+          detectionModel = null;
+          modelPromise = null;
+          yoloModelCache = null;
+          modelRecoveryGeneration++;
+          modelRecoveryDisabled = false;
+          addLog('AI 推理超時，準備重建模型工作環境');
+          setDetectionFailure('AI 推理超時');
+          consecutiveTimeoutRecoveries++;
+          if (consecutiveTimeoutRecoveries >= MAX_CONSECUTIVE_TIMEOUT_RECOVERIES) {
+            modelRecoveryDisabled = true;
+            setDetectionFailure('AI 連續推論超時，請重新啟動偵測');
+            addLog('AI 連續推論超時，已停止自動重建，請停止後重新啟動');
+          } else {
+            void recoverDetectionModel(sessionId, modelRecoveryGeneration, detectPromise);
+          }
         }
       } catch (error) {
         console.error(error);
+        inferenceFailed = true;
+        addLog('AI 推理失敗，無法判斷目前畫面');
       } finally {
         if (timeoutId) clearTimeout(timeoutId);
         detecting = false;
@@ -1795,11 +1857,23 @@
       if (sessionId !== activeSession || !started) return;
       if (inferenceTimedOut) {
         consecutiveInferenceTimeouts++;
-        addLog('AI 推理超時，繼續下一次偵測');
+        return;
+      }
+      if (inferenceFailed) {
+        consecutiveInferenceTimeouts++;
+        setDetectionFailure('AI 推理失敗');
+        scheduleDetection(sessionId);
+        return;
       } else {
         consecutiveInferenceTimeouts = 0;
+        consecutiveTimeoutRecoveries = 0;
       }
-      updateAdaptiveFps(performance.now() - inferenceStart);
+      const completedAt = performance.now();
+      if (lastDetectionCompletedAt > 0) {
+        measuredDetectionFps = 1000 / Math.max(1, completedAt - lastDetectionCompletedAt);
+      }
+      lastDetectionCompletedAt = completedAt;
+      updateAdaptiveFps(completedAt - inferenceStart);
       lastDetectionActivity = Date.now();
       if (previewEnabled) {
         ctx.clearRect(0, 0, width, height);
@@ -1816,12 +1890,14 @@
           return (b.score * bPriority) - (a.score * aPriority);
         });
 
+      const trackByPrediction = new Map();
       if (threats.length > 0) {
         obstacleActive = true;
         detectValue.textContent = '有';
         const now = Date.now();
         cleanTracks(now);
         const { track, previous } = updateTrack(threats[0], width, now);
+        trackByPrediction.set(threats[0], track);
         const [, displayWarning] = getCantoneseWarning(threats[0], width);
         const distance = track.distance;
         const highRisk = track.threatLevel === 'emergency';
@@ -1861,11 +1937,64 @@
         cleanTracks(Date.now());
       }
 
-      if (previewEnabled) visible.forEach(prediction => drawDetection(ctx, prediction));
+      if (previewEnabled) visible.forEach(prediction => drawDetection(ctx, prediction, trackByPrediction.get(prediction) || null));
 
       maybeRunDepthInference();
 
       scheduleDetection(sessionId);
+    }
+
+    function setDetectionFailure(reason) {
+      obstacleActive = false;
+      lastEstimatedDistance = null;
+      lastDetectedObject = '辨識失敗';
+      detectValue.textContent = '無法判斷';
+      distanceValue.textContent = '--';
+      setRisk('辨識失效', reason);
+      lastAlert.textContent = `辨識失效：${reason}`;
+      recordExperimentData({ objectName: '辨識失敗', distanceSource: reason });
+    }
+
+    async function recoverDetectionModel(sessionId, recoveryGeneration, staleInference = null) {
+      let recoveryLoadPromise = null;
+      try {
+        if (staleInference) void staleInference.catch(() => {});
+        if (sessionId !== activeSession || !started || recoveryGeneration !== modelRecoveryGeneration
+          || modelRecoveryInProgress || modelRecoveryDisabled) return;
+        modelRecoveryInProgress = true;
+        modelRecoveryAttempts++;
+        recoveryLoadPromise = loadDetectionModel();
+        const recoveredModel = await Promise.race([
+          recoveryLoadPromise,
+          new Promise((resolve, reject) => {
+            window.setTimeout(() => reject(new Error('AI 模型恢復載入逾時')), MODEL_LOAD_TIMEOUT_MS);
+          })
+        ]);
+        if (!recoveredModel) throw new Error('AI model recovery returned no model');
+        if (sessionId === activeSession && started && recoveryGeneration === modelRecoveryGeneration) {
+          detectionModel = recoveredModel;
+          modelRecoveryAttempts = 0;
+          addLog('AI 模型工作環境已重建，恢復偵測');
+          lastDetectionActivity = Date.now();
+          scheduleDetection(sessionId);
+        }
+      } catch (error) {
+        console.error('AI model recovery failed.', error);
+        if (modelPromise === recoveryLoadPromise) modelPromise = null;
+        if (sessionId !== activeSession || !started || recoveryGeneration !== modelRecoveryGeneration) return;
+        if (modelRecoveryAttempts < MAX_MODEL_RECOVERY_ATTEMPTS) {
+          setDetectionFailure(`AI 模型恢復失敗，重試 ${modelRecoveryAttempts}/${MAX_MODEL_RECOVERY_ATTEMPTS}`);
+          window.setTimeout(() => {
+            void recoverDetectionModel(sessionId, recoveryGeneration);
+          }, 500);
+        } else {
+          modelRecoveryDisabled = true;
+          setDetectionFailure('AI 模型恢復失敗，請重新啟動偵測');
+          addLog('AI 模型多次恢復失敗，請停止後重新啟動');
+        }
+      } finally {
+        modelRecoveryInProgress = false;
+      }
     }
 
     async function startCamera() {
@@ -1874,6 +2003,9 @@
       warmMobileAudio();
       started = true;
       const sessionId = ++activeSession;
+      modelRecoveryGeneration++;
+      modelRecoveryAttempts = 0;
+      modelRecoveryDisabled = false;
       ensureAudioContext();
 
       try {
@@ -1962,6 +2094,7 @@
     function stopCamera() {
       started = false;
       activeSession++;
+      modelRecoveryGeneration++;
       obstacleActive = false;
       lastTriggerTime = 0;
       window.activeCalibratedClass = null;
@@ -2008,6 +2141,11 @@
       lastAlert.textContent = '尚未偵測';
       log.replaceChildren();
       kimiBusy = false;
+      lastDetectionCompletedAt = 0;
+      measuredDetectionFps = 0;
+      modelRecoveryInProgress = false;
+      modelRecoveryAttempts = 0;
+      modelRecoveryDisabled = false;
       kimiStatus.textContent = '輸入 API key 後，可按鈕或快速點擊螢幕四下分析環境。';
     }
 
@@ -2023,6 +2161,9 @@
 
     let tapSequenceCount = 0;
     let tapSequenceTimer = null;
+    let tapStartX = 0;
+    let tapStartY = 0;
+    let tapMoved = false;
     const TAP_SEQUENCE_TIMEOUT_MS = 500;
 
     function handleTapSequence() {
@@ -2030,7 +2171,8 @@
       tapSequenceCount = 0;
       tapSequenceTimer = null;
       if (tapCount === 2) {
-        if (!started) void startCamera();
+        if (started) stopCamera();
+        else void startCamera();
         return;
       }
       if (tapCount === 3) {
@@ -2043,12 +2185,24 @@
 
     document.addEventListener('touchstart', event => {
       if (event.touches.length !== 1) return;
-      if (event.target.closest('input, select, button, textarea')) return;
+      if (!event.target.closest('.camera-box')) return;
+      const touch = event.touches[0];
+      tapStartX = touch.clientX;
+      tapStartY = touch.clientY;
+      tapMoved = false;
+    }, { passive: false });
+
+    document.addEventListener('touchmove', event => {
+      if (event.touches.length !== 1 || !event.target.closest('.camera-box')) return;
+      const touch = event.touches[0];
+      tapMoved = Math.hypot(touch.clientX - tapStartX, touch.clientY - tapStartY) > 12;
+    }, { passive: true });
+
+    document.addEventListener('touchend', event => {
+      if (!event.target.closest('.camera-box') || tapMoved) return;
       event.preventDefault();
       tapSequenceCount += 1;
-      if (tapSequenceCount > 4) {
-        tapSequenceCount = 1;
-      }
+      if (tapSequenceCount > 4) tapSequenceCount = 1;
       if (tapSequenceTimer !== null) window.clearTimeout(tapSequenceTimer);
       tapSequenceTimer = window.setTimeout(handleTapSequence, TAP_SEQUENCE_TIMEOUT_MS);
     }, { passive: false });

@@ -379,7 +379,7 @@
             <input id="kimiApiKey" type="password" autocomplete="off" placeholder="輸入 Kimi API key">
             <button id="kimiBtn" type="button">分析當下環境</button>
           </div>
-          <div id="kimiStatus" class="small">輸入 API key 後，可按鈕或快速點擊螢幕兩下分析環境。</div>
+          <div id="kimiStatus" class="small">輸入 API key 後，可按鈕或快速點擊螢幕四下分析環境。</div>
           <div id="kimiResult" class="warning-text">Kimi 尚未分析影像</div>
         </div>
 
@@ -2039,7 +2039,7 @@
       lastAlert.textContent = '尚未偵測';
       log.replaceChildren();
       kimiBusy = false;
-      kimiStatus.textContent = '輸入 API key 後，可按鈕或快速點擊螢幕兩下分析環境。';
+      kimiStatus.textContent = '輸入 API key 後，可按鈕或快速點擊螢幕四下分析環境。';
     }
 
     previewBtn.addEventListener('click', () => {
@@ -2052,18 +2052,36 @@
       }
     });
 
-    let lastKimiTouchTime = 0;
+    let tapSequenceCount = 0;
+    let tapSequenceTimer = null;
+    const TAP_SEQUENCE_TIMEOUT_MS = 500;
+
+    function handleTapSequence() {
+      const tapCount = tapSequenceCount;
+      tapSequenceCount = 0;
+      tapSequenceTimer = null;
+      if (tapCount === 2) {
+        if (!started) void startCamera();
+        return;
+      }
+      if (tapCount === 3) {
+        modelModeSelect.value = selectedModelMode === 'yolo' ? 'coco' : 'yolo';
+        modelModeSelect.dispatchEvent(new Event('change'));
+        return;
+      }
+      if (tapCount === 4) void askKimiForScene();
+    }
+
     document.addEventListener('touchstart', event => {
       if (event.touches.length !== 1) return;
       if (event.target.closest('input, select, button, textarea')) return;
-      const now = Date.now();
-      if (now - lastKimiTouchTime < 350) {
-        event.preventDefault();
-        lastKimiTouchTime = 0;
-        void askKimiForScene();
-        return;
+      event.preventDefault();
+      tapSequenceCount += 1;
+      if (tapSequenceCount > 4) {
+        tapSequenceCount = 1;
       }
-      lastKimiTouchTime = now;
+      if (tapSequenceTimer !== null) window.clearTimeout(tapSequenceTimer);
+      tapSequenceTimer = window.setTimeout(handleTapSequence, TAP_SEQUENCE_TIMEOUT_MS);
     }, { passive: false });
 
     document.addEventListener('touchstart', warmMobileAudio, { passive: true, once: true });
